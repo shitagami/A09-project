@@ -44,12 +44,13 @@ class DefaultFirebaseOptions {
   }
 
   static const FirebaseOptions web = FirebaseOptions(
-    apiKey: 'YOUR-WEB-API-KEY',
-    appId: 'YOUR-WEB-APP-ID',
-    messagingSenderId: 'YOUR-SENDER-ID',
-    projectId: 'YOUR-PROJECT-ID',
-    authDomain: 'YOUR-PROJECT-ID.firebaseapp.com',
-    storageBucket: 'YOUR-PROJECT-ID.appspot.com',
+    apiKey: 'AIzaSyDups1E-9EkmbqgJEvRk01-J28DmNW0bho',
+    appId: '1:1059808914702:web:0289baca895415a979bb5f',
+    messagingSenderId: '1059808914702',
+    projectId: 'byle-beacon-app',
+    authDomain: 'byle-beacon-app.firebaseapp.com',
+    storageBucket: 'byle-beacon-app.firebasestorage.app',
+    measurementId: 'G-NXLG0HW32Y',
   );
 
   static const FirebaseOptions android = FirebaseOptions(

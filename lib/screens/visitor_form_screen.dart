@@ -13,6 +13,8 @@ class _VisitorFormScreenState extends State<VisitorFormScreen> {
   final _formKey = GlobalKey<FormState>();
   final _emailController = TextEditingController();
   final _ageController = TextEditingController();
+  final _companyController = TextEditingController();
+  final _positionController = TextEditingController();
   
   final FirebaseService _firebaseService = FirebaseService();
   final AuthService _authService = AuthService();
@@ -23,6 +25,7 @@ class _VisitorFormScreenState extends State<VisitorFormScreen> {
   String _selectedGender = '男性';
   String _selectedEventSource = 'Web';
   String _selectedJob = '会社員';
+  String _selectedIndustry = 'IT・情報通信';
   List<String> _selectedInterests = [];
 
   final List<String> _genderOptions = ['男性', '女性', 'その他'];
@@ -59,11 +62,29 @@ class _VisitorFormScreenState extends State<VisitorFormScreen> {
     'アート・デザイン',
     '環境・サステナビリティ'
   ];
+  final List<String> _industryOptions = [
+    'IT・情報通信',
+    '製造業',
+    '金融・保険',
+    '商社・卸売',
+    '小売業',
+    'サービス業',
+    '建設・不動産',
+    '医療・福祉',
+    '教育・研究',
+    '官公庁・公共',
+    'メディア・広告',
+    '運輸・物流',
+    '農林水産',
+    'その他'
+  ];
 
   @override
   void dispose() {
     _emailController.dispose();
     _ageController.dispose();
+    _companyController.dispose();
+    _positionController.dispose();
     super.dispose();
   }
 
@@ -98,6 +119,9 @@ class _VisitorFormScreenState extends State<VisitorFormScreen> {
         'gender': _selectedGender,
         'eventSource': _selectedEventSource,
         'job': _selectedJob,
+        'company': _companyController.text.trim(),
+        'position': _positionController.text.trim(),
+        'industry': _selectedIndustry,
         'interests': _selectedInterests,
         'createdAt': DateTime.now(),
       });
@@ -183,7 +207,7 @@ class _VisitorFormScreenState extends State<VisitorFormScreen> {
                       ),
                       const SizedBox(height: 8),
                       const Text(
-                        'より良いサービス提供のため、簡単な情報をご記入ください。\n（任意項目ですが、ご協力いただけると幸いです）',
+                        'このアプリは会場内の混雑状況がわかるアプリケーションです\nブースの混雑度に応じておすすめのルートを提案できます\n情報入力は、任意項目ではありますがご協力していただけると幸いです\n（入力された情報は、主催者や出展者の統計に使用されます）',
                         style: TextStyle(fontSize: 14, color: Colors.black87),
                       ),
                     ],
@@ -276,6 +300,65 @@ class _VisitorFormScreenState extends State<VisitorFormScreen> {
                 onChanged: (value) {
                   setState(() {
                     _selectedJob = value!;
+                  });
+                },
+              ),
+              
+              const SizedBox(height: 16),
+
+              // 所属（会社名）
+              TextFormField(
+                controller: _companyController,
+                decoration: const InputDecoration(
+                  labelText: '所属（会社名・学校名など）',
+                  border: OutlineInputBorder(),
+                  prefixIcon: Icon(Icons.business),
+                  hintText: '株式会社〇〇',
+                ),
+                validator: (value) {
+                  if (value == null || value.isEmpty) {
+                    return '所属を入力してください';
+                  }
+                  return null;
+                },
+              ),
+              
+              const SizedBox(height: 16),
+
+              // 役職
+              TextFormField(
+                controller: _positionController,
+                decoration: const InputDecoration(
+                  labelText: '役職',
+                  border: OutlineInputBorder(),
+                  prefixIcon: Icon(Icons.badge),
+                  hintText: '部長、課長、担当者など',
+                ),
+                validator: (value) {
+                  if (value == null || value.isEmpty) {
+                    return '役職を入力してください';
+                  }
+                  return null;
+                },
+              ),
+              
+              const SizedBox(height: 16),
+
+              // 業種
+              DropdownButtonFormField<String>(
+                value: _selectedIndustry,
+                decoration: const InputDecoration(
+                  labelText: '業種',
+                  border: OutlineInputBorder(),
+                  prefixIcon: Icon(Icons.business_center),
+                ),
+                items: _industryOptions.map((industry) => DropdownMenuItem(
+                  value: industry,
+                  child: Text(industry),
+                )).toList(),
+                onChanged: (value) {
+                  setState(() {
+                    _selectedIndustry = value!;
                   });
                 },
               ),

@@ -6,6 +6,87 @@ class FirebaseService {
   final FirebaseFirestore _firestore = FirebaseFirestore.instance;
   // ユーザーが同じビーコンに短時間でアクセスしたかどうかを記録するマップ
   final Map<String, DateTime> _lastProcessedUserBeacon = {};
+  
+  // ビーコンの物理名からブースIDへのマッピング
+  static const Map<String, String> beaconNameMapping = {
+    'FSC-BP104D': 'FSC-BP104D',  // 1台目: A09
+    'FSC-BP103B': 'Booth-A15',   // 2台目: A15（右下）
+  };
+  
+  /// ビーコンの物理名をブースIDに変換
+  String getBoothIdFromBeaconName(String beaconName) {
+    return beaconNameMapping[beaconName] ?? beaconName;
+  }
+
+  /// 既存の来場者のタイムスタンプのみを更新（カウントは増やさない）
+  Future<void> updateVisitorTimestamp(String deviceName, String userId, {String eventType = 'visit'}) async {
+    try {
+      final now = DateTime.now();
+      final dateString = DateFormat('yyyy-MM-dd').format(now);
+      print('=== updateVisitorTimestamp開始: $deviceName (ユーザー: $userId) ===');
+      
+      final docRef = _firestore
+          .collection('beacon_counts')
+          .doc(dateString)
+          .collection('devices')
+          .doc(deviceName);
+
+      await _firestore.runTransaction((transaction) async {
+        final doc = await transaction.get(docRef);
+        
+        if (doc.exists) {
+          final rawVisitors = doc.data()?['visitors'];
+          final existingVisitors = <Map<String, dynamic>>[];
+          bool updated = false;
+          
+          if (rawVisitors != null && rawVisitors is List) {
+            // 最新のレコードを探してlastDetectedAtを更新
+            DateTime? latestTimestamp;
+            int latestIndex = -1;
+            
+            for (int i = 0; i < rawVisitors.length; i++) {
+              final visitor = rawVisitors[i];
+              if (visitor is Map<String, dynamic>) {
+                if (visitor['userId'] == userId && visitor['eventType'] == eventType) {
+                  final timestamp = visitor['timestamp'];
+                  if (timestamp is Timestamp) {
+                    final visitTime = timestamp.toDate();
+                    if (latestTimestamp == null || visitTime.isAfter(latestTimestamp)) {
+                      latestTimestamp = visitTime;
+                      latestIndex = i;
+                    }
+                  }
+                }
+                existingVisitors.add(visitor);
+              }
+            }
+            
+            // 最新のレコードのlastDetectedAtを更新
+            if (latestIndex >= 0) {
+              existingVisitors[latestIndex] = Map<String, dynamic>.from(existingVisitors[latestIndex]);
+              existingVisitors[latestIndex]['lastDetectedAt'] = Timestamp.now();
+              updated = true;
+              print('最新レコード（インデックス$latestIndex）のlastDetectedAtを更新しました');
+            }
+          }
+          
+          if (updated) {
+            transaction.update(docRef, {
+              'visitors': existingVisitors,
+              'lastSeen': FieldValue.serverTimestamp(),
+            });
+            print('タイムスタンプ更新完了');
+          } else {
+            print('更新対象のレコードが見つかりませんでした');
+          }
+        }
+      });
+      
+      print('=== updateVisitorTimestamp完了 ===');
+    } catch (e) {
+      print('タイムスタンプ更新中にエラーが発生しました: $e');
+    }
+  }
 
   /// BLEビーコン受信時にカウントと来場者属性をFirebaseに保存
   Future<void> incrementBeaconCount(String deviceName, {String? userId, String eventType = 'visit'}) async {
@@ -57,11 +138,15 @@ class FirebaseService {
             visitorRecord = {
               'userId': userId,
               'timestamp': Timestamp.now(),
+              'lastDetectedAt': Timestamp.now(), // 最終検出時刻を追加
               'microsecondsSinceEpoch': DateTime.now().microsecondsSinceEpoch, // 一意性を確保
               'eventType': eventType,
               'age': visitorData['age'],
               'gender': visitorData['gender'],
               'job': visitorData['job'],
+              'company': visitorData['company'],
+              'position': visitorData['position'],
+              'industry': visitorData['industry'],
               'eventSource': visitorData['eventSource'],
               'interests': visitorData['interests'],
             };
@@ -70,6 +155,7 @@ class FirebaseService {
             visitorRecord = {
               'userId': userId,
               'timestamp': Timestamp.now(),
+              'lastDetectedAt': Timestamp.now(), // 最終検出時刻を追加
               'microsecondsSinceEpoch': DateTime.now().microsecondsSinceEpoch, // 一意性を確保
               'eventSource': 'BLE_Detection',
               'eventType': eventType,
@@ -90,24 +176,70 @@ class FirebaseService {
           print('生のvisitorsデータ: $rawVisitors (型: ${rawVisitors.runtimeType})');
           
           final existingVisitors = <Map<String, dynamic>>[];
+          bool shouldUpdateTimestamp = false;
+          DateTime? latestVisitTimestamp;
+          
           if (rawVisitors != null && rawVisitors is List) {
+            // 同じuserIdとeventTypeの最新のレコードを探す
             for (final visitor in rawVisitors) {
               if (visitor is Map<String, dynamic>) {
+                if (visitor['userId'] == userId && visitor['eventType'] == eventType) {
+                  final timestamp = visitor['timestamp'];
+                  if (timestamp is Timestamp) {
+                    final visitTime = timestamp.toDate();
+                    if (latestVisitTimestamp == null || visitTime.isAfter(latestVisitTimestamp)) {
+                      latestVisitTimestamp = visitTime;
+                    }
+                  }
+                }
                 existingVisitors.add(visitor);
               }
             }
           }
-          print('処理後の既存visitors: ${existingVisitors.length}件');
           
-          // 新しい訪問者データを追加
-          if (visitorRecord != null) {
-            existingVisitors.add(visitorRecord);
-            print('新しい訪問者を追加: ${visitorRecord['userId']}');
-            print('更新後のvisitors総数: ${existingVisitors.length}件');
+          // 最新の訪問から30秒以内なら、lastDetectedAtのみ更新
+          // 30秒以上経過していれば、新しい訪問として記録
+          if (latestVisitTimestamp != null) {
+            final timeSinceLastVisit = now.difference(latestVisitTimestamp);
+            if (timeSinceLastVisit <= const Duration(seconds: 30)) {
+              // 短時間内の再検出 → 最新レコードのlastDetectedAtを更新
+              shouldUpdateTimestamp = true;
+              print('短時間内の再検出 (${timeSinceLastVisit.inSeconds}秒前): lastDetectedAtを更新');
+              
+              // 最新のレコードを探して更新
+              for (int i = existingVisitors.length - 1; i >= 0; i--) {
+                final visitor = existingVisitors[i];
+                if (visitor['userId'] == userId && visitor['eventType'] == eventType) {
+                  final timestamp = visitor['timestamp'];
+                  if (timestamp is Timestamp && timestamp.toDate() == latestVisitTimestamp) {
+                    existingVisitors[i] = Map<String, dynamic>.from(visitor);
+                    existingVisitors[i]['lastDetectedAt'] = Timestamp.now();
+                    print('最新レコードの lastDetectedAt を更新');
+                    break;
+                  }
+                }
+              }
+            } else {
+              print('30秒以上経過 (${timeSinceLastVisit.inSeconds}秒前): 新しい訪問として記録');
+            }
           }
           
-          // long_stayの場合はcountをインクリメントしない
-          final newCount = visitorRecord?['eventType'] == 'long_stay' ? currentCount : currentCount + 1;
+          print('処理後の既存visitors: ${existingVisitors.length}件');
+          
+          // 新しい訪問者データを追加（初回訪問、または30秒以上経過後の再訪問）
+          if (visitorRecord != null && !shouldUpdateTimestamp) {
+            existingVisitors.add(visitorRecord);
+            print('新しい訪問レコードを追加: ${visitorRecord['userId']}');
+            print('更新後のvisitors総数: ${existingVisitors.length}件');
+          } else if (shouldUpdateTimestamp) {
+            print('既存レコードのタイムスタンプを更新しました（新しいレコードは追加せず）');
+          }
+          
+          // long_stayの場合、または既存訪問者のタイムスタンプ更新の場合はcountをインクリメントしない
+          final shouldIncrementCount = visitorRecord != null && 
+                                        !shouldUpdateTimestamp && 
+                                        visitorRecord['eventType'] != 'long_stay';
+          final newCount = shouldIncrementCount ? currentCount + 1 : currentCount;
           
           final updateData = {
             'count': newCount,
@@ -201,16 +333,48 @@ class FirebaseService {
       print('取得されたドキュメント数: ${querySnapshot.docs.length}');
       
       final stats = <String, dynamic>{};
+      final now = DateTime.now();
+      const activeThreshold = Duration(seconds: 20); // 20秒以内をアクティブと判定
+      
       for (final doc in querySnapshot.docs) {
         final rawData = doc.data();
         print('ドキュメントID: ${doc.id}, 生データ: $rawData');
         
+        final isTestData = rawData['isTestData'] == true;
+        int displayCount = 0;
+        
+        if (isTestData) {
+          // テストデータの場合は、countフィールドをそのまま使用
+          displayCount = rawData['count'] ?? 0;
+          print('テストデータ: countをそのまま使用 = $displayCount');
+        } else {
+          // 実際のデータの場合は、アクティブな来場者をカウント（最終検出時刻が20秒以内）
+          final visitors = rawData['visitors'];
+          if (visitors != null && visitors is List) {
+            for (final visitor in visitors) {
+              if (visitor is Map<String, dynamic>) {
+                final lastDetectedAt = visitor['lastDetectedAt'];
+                if (lastDetectedAt is Timestamp) {
+                  final lastDetectedTime = lastDetectedAt.toDate();
+                  final timeDiff = now.difference(lastDetectedTime);
+                  if (timeDiff <= activeThreshold) {
+                    displayCount++;
+                  }
+                }
+              }
+            }
+          }
+          print('実データ: アクティブ訪問者 = $displayCount');
+        }
+        
         // Timestampやその他のFirebase特有の型を安全な形式に変換
         final cleanData = <String, dynamic>{
-          'count': rawData['count'] ?? 0,
+          'count': displayCount,
+          'totalVisits': rawData['count'] ?? 0, // 累計訪問数も保持
           'deviceName': rawData['deviceName'] ?? doc.id,
           'firstSeen': rawData['firstSeen']?.toString() ?? '',
           'lastSeen': rawData['lastSeen']?.toString() ?? '',
+          'isTestData': isTestData,
         };
         
         print('変換後データ: $cleanData');
@@ -378,10 +542,24 @@ class FirebaseService {
 
         // テスト用の来場者データを生成
         final visitors = <Map<String, dynamic>>[];
-        final genders = ['男性', '女性'];
-        final jobs = ['会社員', '学生', '自営業', '主婦'];
+        final genders = ['男性', '女性', 'その他'];
+        final jobs = [
+          '会社員',
+          '公務員',
+          '自営業',
+          '学生',
+          '主婦・主夫',
+          'フリーランス',
+          '医師・看護師',
+          'エンジニア',
+          '教師・講師',
+          'その他'
+        ];
         final sources = ['SNS', 'ウェブサイト', '友人紹介', 'チラシ'];
         final interests = [['IT', 'ビジネス'], ['アート', 'デザイン'], ['教育', '学習'], ['健康', '美容']];
+        final companies = ['株式会社ABC', '株式会社XYZ', 'テクノロジー株式会社', '〇〇大学', 'フリーランス', 'スタートアップ企業', '大手メーカー'];
+        final positions = ['部長', '課長', '主任', '担当者', '学生', '代表取締役', 'マネージャー', 'ディレクター', '一般社員'];
+        final industries = ['IT・情報通信', '製造業', '金融・保険', '商社・卸売', '小売業', 'サービス業', '教育・研究', '建設・不動産', '医療・福祉', 'メディア・広告'];
         
         for (int i = 0; i < count; i++) {
           final userId = 'test_visitor_${random.nextInt(100000)}';
@@ -390,6 +568,9 @@ class FirebaseService {
           final job = jobs[random.nextInt(jobs.length)];
           final source = sources[random.nextInt(sources.length)];
           final interest = interests[random.nextInt(interests.length)];
+          final company = companies[random.nextInt(companies.length)];
+          final position = positions[random.nextInt(positions.length)];
+          final industry = industries[random.nextInt(industries.length)];
           
           // visitorsコレクションにも保存（見込み客リスト用）
           await _firestore.collection('visitors').doc(userId).set({
@@ -399,6 +580,9 @@ class FirebaseService {
             'age': age,
             'gender': gender,
             'job': job,
+            'company': company,
+            'position': position,
+            'industry': industry,
             'eventSource': source,
             'interests': interest,
           });
@@ -407,12 +591,19 @@ class FirebaseService {
           final visitTime = today.subtract(Duration(minutes: random.nextInt(480))); // 8時間前まで
           final eventType = random.nextDouble() < 0.1 ? 'long_stay' : 'visit'; // 10%の確率でlong_stay
           
+          // 100%アクティブ（すべて現在その場にいる状態）
+          final lastDetectedAt = Timestamp.fromDate(today.subtract(Duration(seconds: random.nextInt(15)))); // 0-15秒前（アクティブ）
+          
           visitors.add({
             'userId': userId,
             'timestamp': Timestamp.fromDate(visitTime),
+            'lastDetectedAt': lastDetectedAt, // 最終検出時刻を追加
             'age': age,
             'gender': gender,
             'job': job,
+            'company': company,
+            'position': position,
+            'industry': industry,
             'eventSource': source,
             'interests': interest,
             'eventType': eventType,
@@ -421,12 +612,20 @@ class FirebaseService {
           // 再訪問のテストデータを追加（30%の確率）
           if (random.nextDouble() < 0.3) {
             final revisitTime = visitTime.add(Duration(minutes: random.nextInt(60) + 30)); // 30分後から90分後
+            
+            // 再訪問も100%アクティブ
+            final revisitLastDetectedAt = Timestamp.fromDate(today.subtract(Duration(seconds: random.nextInt(15)))); // 0-15秒前（アクティブ）
+            
             visitors.add({
               'userId': userId,
               'timestamp': Timestamp.fromDate(revisitTime),
+              'lastDetectedAt': revisitLastDetectedAt, // 最終検出時刻を追加
               'age': age,
               'gender': gender,
               'job': job,
+              'company': company,
+              'position': position,
+              'industry': industry,
               'eventSource': source,
               'interests': interest,
               'eventType': 'visit',
@@ -1118,6 +1317,900 @@ class FirebaseService {
     } catch (e) {
       print('全予約情報の取得中にエラーが発生しました: $e');
       return [];
+    }
+  }
+
+  /// 企業属性統計を取得
+  Future<Map<String, dynamic>> getCompanyAttributeStats() async {
+    try {
+      print('=== 企業属性統計の取得開始 ===');
+      
+      final visitors = await getAllVisitors();
+      
+      // 業種別集計
+      final industryCount = <String, int>{};
+      // 役職別集計
+      final positionCount = <String, int>{};
+      // 職業別集計
+      final jobCount = <String, int>{};
+      // 興味分野別集計
+      final interestCount = <String, int>{};
+      
+      for (final visitor in visitors) {
+        // 業種
+        final industry = visitor['industry']?.toString() ?? '未設定';
+        industryCount[industry] = (industryCount[industry] ?? 0) + 1;
+        
+        // 役職
+        final position = visitor['position']?.toString() ?? '未設定';
+        positionCount[position] = (positionCount[position] ?? 0) + 1;
+        
+        // 職業
+        final job = visitor['job']?.toString() ?? '未設定';
+        jobCount[job] = (jobCount[job] ?? 0) + 1;
+        
+        // 興味のある分野（複数選択可能なので各要素をカウント）
+        final interests = visitor['interests'];
+        if (interests != null && interests is List) {
+          for (final interest in interests) {
+            final interestStr = interest.toString();
+            interestCount[interestStr] = (interestCount[interestStr] ?? 0) + 1;
+          }
+        }
+      }
+      
+      print('業種別集計: $industryCount');
+      print('役職別集計: $positionCount');
+      print('職業別集計: $jobCount');
+      print('興味分野別集計: $interestCount');
+      
+      return {
+        'industry': industryCount,
+        'position': positionCount,
+        'job': jobCount,
+        'interests': interestCount,
+        'totalVisitors': visitors.length,
+      };
+    } catch (e) {
+      print('企業属性統計の取得中にエラーが発生しました: $e');
+      return {
+        'industry': <String, int>{},
+        'position': <String, int>{},
+        'job': <String, int>{},
+        'interests': <String, int>{},
+        'totalVisitors': 0,
+      };
+    }
+  }
+
+  // ========================
+  // マップレイアウト管理
+  // ========================
+
+  /// 現在アクティブな展示会レイアウトを取得
+  Future<Map<String, dynamic>?> getActiveEventLayout() async {
+    try {
+      print('=== アクティブな展示会レイアウトの取得開始 ===');
+      
+      final querySnapshot = await _firestore
+          .collection('event_layouts')
+          .where('active', isEqualTo: true)
+          .limit(1)
+          .get();
+      
+      if (querySnapshot.docs.isEmpty) {
+        print('アクティブな展示会レイアウトが見つかりません');
+        return null;
+      }
+      
+      final doc = querySnapshot.docs.first;
+      final data = doc.data();
+      data['id'] = doc.id;
+      
+      print('アクティブな展示会レイアウトを取得: ${data['eventName']}');
+      return data;
+    } catch (e) {
+      print('展示会レイアウトの取得中にエラーが発生しました: $e');
+      return null;
+    }
+  }
+
+  /// 特定の展示会のマップ要素を取得
+  Future<List<Map<String, dynamic>>> getMapElements(String eventId) async {
+    try {
+      print('=== マップ要素の取得開始: eventId=$eventId ===');
+      
+      final querySnapshot = await _firestore
+          .collection('map_elements')
+          .where('eventId', isEqualTo: eventId)
+          .get();
+      
+      final elements = <Map<String, dynamic>>[];
+      for (final doc in querySnapshot.docs) {
+        final data = doc.data();
+        data['id'] = doc.id;
+        elements.add(data);
+      }
+      
+      // zIndexでソート（クライアント側）
+      elements.sort((a, b) {
+        final aIndex = a['zIndex'] as int? ?? 0;
+        final bIndex = b['zIndex'] as int? ?? 0;
+        return aIndex.compareTo(bIndex);
+      });
+      
+      print('マップ要素を取得: ${elements.length}件');
+      return elements;
+    } catch (e) {
+      print('マップ要素の取得中にエラーが発生しました: $e');
+      return [];
+    }
+  }
+
+  /// マップレイアウトを初期化（現在のハードコードされたレイアウトをDBに保存）
+  Future<void> initializeMapLayout() async {
+    try {
+      print('=== マップレイアウトの初期化開始 ===');
+      
+      // まず既存のアクティブなレイアウトを非アクティブにする
+      final existingLayouts = await _firestore
+          .collection('event_layouts')
+          .where('active', isEqualTo: true)
+          .get();
+      
+      final batch = _firestore.batch();
+      for (final doc in existingLayouts.docs) {
+        batch.update(doc.reference, {'active': false});
+      }
+      await batch.commit();
+      
+      // 新しい展示会レイアウトを作成
+      final eventRef = _firestore.collection('event_layouts').doc('event_2025_default');
+      await eventRef.set({
+        'eventName': '2025年デフォルト展示会',
+        'eventDate': '2025-01-01',
+        'mapWidth': 700,
+        'mapHeight': 500,
+        'backgroundColor': '#FAFAFA',
+        'gridSize': 10,
+        'active': true,
+        'createdAt': FieldValue.serverTimestamp(),
+      });
+      
+      print('展示会レイアウトを作成: event_2025_default');
+      
+      // マップ要素を作成
+      final mapElements = <Map<String, dynamic>>[
+        // 背景
+        {
+          'eventId': 'event_2025_default',
+          'type': 'background',
+          'shape': 'rect',
+          'x': 0,
+          'y': 0,
+          'width': 700,
+          'height': 500,
+          'color': '#FAFAFA',
+          'label': '背景',
+          'zIndex': 0,
+        },
+        
+        // 会場の外枠
+        {
+          'eventId': 'event_2025_default',
+          'type': 'wall',
+          'shape': 'rect',
+          'x': 20,
+          'y': 20,
+          'width': 660,
+          'height': 460,
+          'color': '#BDBDBD',
+          'strokeWidth': 2,
+          'filled': false,
+          'label': '会場外枠',
+          'zIndex': 1,
+        },
+        
+        // エントランス
+        {
+          'eventId': 'event_2025_default',
+          'type': 'entrance',
+          'shape': 'rect',
+          'x': 80,
+          'y': 20,
+          'width': 40,
+          'height': 20,
+          'color': '#A1887F',
+          'label': '正面エントランス',
+          'zIndex': 2,
+        },
+        {
+          'eventId': 'event_2025_default',
+          'type': 'entrance',
+          'shape': 'rect',
+          'x': 580,
+          'y': 20,
+          'width': 40,
+          'height': 20,
+          'color': '#A1887F',
+          'label': 'サイドエントランス',
+          'zIndex': 2,
+        },
+        
+        // 横通路
+        {
+          'eventId': 'event_2025_default',
+          'type': 'corridor',
+          'shape': 'rect',
+          'x': 20,
+          'y': 80,
+          'width': 660,
+          'height': 30,
+          'color': '#EEEEEE',
+          'label': '横通路1',
+          'zIndex': 1,
+        },
+        {
+          'eventId': 'event_2025_default',
+          'type': 'corridor',
+          'shape': 'rect',
+          'x': 20,
+          'y': 200,
+          'width': 660,
+          'height': 30,
+          'color': '#EEEEEE',
+          'label': '横通路2',
+          'zIndex': 1,
+        },
+        {
+          'eventId': 'event_2025_default',
+          'type': 'corridor',
+          'shape': 'rect',
+          'x': 20,
+          'y': 320,
+          'width': 660,
+          'height': 30,
+          'color': '#EEEEEE',
+          'label': '横通路3',
+          'zIndex': 1,
+        },
+        
+        // 縦通路
+        {
+          'eventId': 'event_2025_default',
+          'type': 'corridor',
+          'shape': 'rect',
+          'x': 140,
+          'y': 20,
+          'width': 30,
+          'height': 460,
+          'color': '#EEEEEE',
+          'label': '縦通路1',
+          'zIndex': 1,
+        },
+        {
+          'eventId': 'event_2025_default',
+          'type': 'corridor',
+          'shape': 'rect',
+          'x': 240,
+          'y': 20,
+          'width': 30,
+          'height': 460,
+          'color': '#EEEEEE',
+          'label': '縦通路2',
+          'zIndex': 1,
+        },
+        {
+          'eventId': 'event_2025_default',
+          'type': 'corridor',
+          'shape': 'rect',
+          'x': 540,
+          'y': 20,
+          'width': 30,
+          'height': 460,
+          'color': '#EEEEEE',
+          'label': '縦通路3',
+          'zIndex': 1,
+        },
+      ];
+      
+      // バッチで保存
+      final elementBatch = _firestore.batch();
+      int elementIndex = 0;
+      for (final element in mapElements) {
+        final elementRef = _firestore.collection('map_elements').doc('element_${elementIndex++}');
+        elementBatch.set(elementRef, element);
+      }
+      await elementBatch.commit();
+      
+      print('=== マップレイアウトの初期化完了: ${mapElements.length}件の要素を保存 ===');
+    } catch (e) {
+      print('マップレイアウトの初期化中にエラーが発生しました: $e');
+      throw Exception('マップレイアウトの初期化に失敗しました: $e');
+    }
+  }
+
+  /// 新しい展示会レイアウトを作成
+  Future<String?> createEventLayout(Map<String, dynamic> layoutData) async {
+    try {
+      print('=== 新しい展示会レイアウトの作成開始 ===');
+      
+      final docRef = await _firestore.collection('event_layouts').add({
+        ...layoutData,
+        'createdAt': FieldValue.serverTimestamp(),
+      });
+      
+      print('展示会レイアウトを作成: ${docRef.id}');
+      return docRef.id;
+    } catch (e) {
+      print('展示会レイアウトの作成中にエラーが発生しました: $e');
+      return null;
+    }
+  }
+
+  /// マップ要素を追加
+  Future<String?> addMapElement(Map<String, dynamic> elementData) async {
+    try {
+      final docRef = await _firestore.collection('map_elements').add(elementData);
+      print('マップ要素を追加: ${docRef.id}');
+      return docRef.id;
+    } catch (e) {
+      print('マップ要素の追加中にエラーが発生しました: $e');
+      return null;
+    }
+  }
+
+  /// マップ要素を更新
+  Future<bool> updateMapElement(String elementId, Map<String, dynamic> updates) async {
+    try {
+      await _firestore.collection('map_elements').doc(elementId).update(updates);
+      print('マップ要素を更新: $elementId');
+      return true;
+    } catch (e) {
+      print('マップ要素の更新中にエラーが発生しました: $e');
+      return false;
+    }
+  }
+
+  /// マップ要素を削除
+  Future<bool> deleteMapElement(String elementId) async {
+    try {
+      await _firestore.collection('map_elements').doc(elementId).delete();
+      print('マップ要素を削除: $elementId');
+      return true;
+    } catch (e) {
+      print('マップ要素の削除中にエラーが発生しました: $e');
+      return false;
+    }
+  }
+
+  /// 展示会レイアウトをアクティブに設定
+  Future<bool> setActiveEventLayout(String eventId) async {
+    try {
+      print('=== 展示会レイアウトのアクティブ化開始: $eventId ===');
+      
+      final batch = _firestore.batch();
+      
+      // すべてのレイアウトを非アクティブにする
+      final allLayouts = await _firestore.collection('event_layouts').get();
+      for (final doc in allLayouts.docs) {
+        batch.update(doc.reference, {'active': false});
+      }
+      
+      // 指定されたレイアウトをアクティブにする
+      final targetRef = _firestore.collection('event_layouts').doc(eventId);
+      batch.update(targetRef, {'active': true});
+      
+      await batch.commit();
+      
+      print('=== 展示会レイアウトをアクティブ化完了 ===');
+      return true;
+    } catch (e) {
+      print('展示会レイアウトのアクティブ化中にエラーが発生しました: $e');
+      return false;
+    }
+  }
+
+  // ========================
+  // ブースサイズ管理
+  // ========================
+
+  /// ブースのサイズと形状を更新
+  Future<bool> updateBoothSize({
+    required String boothId,
+    double? width,
+    double? height,
+    String? shape,
+  }) async {
+    try {
+      print('=== ブースサイズの更新開始: $boothId ===');
+      
+      final updateData = <String, dynamic>{};
+      if (width != null) updateData['width'] = width;
+      if (height != null) updateData['height'] = height;
+      if (shape != null) updateData['shape'] = shape;
+      
+      await _firestore
+          .collection('booths')
+          .doc(boothId)
+          .update(updateData);
+      
+      print('ブースサイズを更新: $boothId - $updateData');
+      return true;
+    } catch (e) {
+      print('ブースサイズの更新中にエラーが発生しました: $e');
+      return false;
+    }
+  }
+
+  /// すべてのブースにデフォルトのサイズ情報を追加
+  Future<void> initializeBoothSizes() async {
+    try {
+      print('=== ブースサイズの初期化開始 ===');
+      
+      final booths = await _firestore.collection('booths').get();
+      final batch = _firestore.batch();
+      
+      for (final doc in booths.docs) {
+        final data = doc.data();
+        
+        // サイズ情報がない場合のみ追加
+        if (!data.containsKey('width') || !data.containsKey('height') || !data.containsKey('shape')) {
+          batch.update(doc.reference, {
+            'width': data['width'] ?? 30,
+            'height': data['height'] ?? 30,
+            'shape': data['shape'] ?? 'circle',
+          });
+        }
+      }
+      
+      await batch.commit();
+      print('=== ブースサイズの初期化完了: ${booths.docs.length}件 ===');
+    } catch (e) {
+      print('ブースサイズの初期化中にエラーが発生しました: $e');
+      throw Exception('ブースサイズの初期化に失敗しました: $e');
+    }
+  }
+
+  /// 特定のブースに異なるサイズを設定するサンプル
+  Future<void> setCustomBoothSizes() async {
+    try {
+      print('=== カスタムブースサイズの設定開始 ===');
+      
+      // サンプル: ブースごとに異なるサイズと形状を設定
+      final customSizes = {
+        'FSC-BP104D': {
+          'width': 50,
+          'height': 60,
+          'shape': 'rect', // 長方形
+        },
+        'Booth-A2': {
+          'width': 40,
+          'height': 40,
+          'shape': 'square', // 正方形
+        },
+        'Booth-A3': {
+          'width': 45,
+          'height': 45,
+          'shape': 'circle', // 円形（widthが直径になる）
+        },
+        'Booth-B1': {
+          'width': 35,
+          'height': 50,
+          'shape': 'rect',
+        },
+        'Booth-B2': {
+          'width': 60,
+          'height': 40,
+          'shape': 'rect', // 横長の長方形
+        },
+      };
+      
+      int successCount = 0;
+      int skipCount = 0;
+      
+      for (final entry in customSizes.entries) {
+        final boothId = entry.key;
+        final sizeData = entry.value;
+        
+        final docRef = _firestore.collection('booths').doc(boothId);
+        
+        // ドキュメントの存在確認
+        final docSnapshot = await docRef.get();
+        
+        if (docSnapshot.exists) {
+          // 存在する場合は更新
+          await docRef.update(sizeData);
+          print('✅ ブースサイズを更新: $boothId - $sizeData');
+          successCount++;
+        } else {
+          // 存在しない場合はスキップ
+          print('⚠️ ブースが存在しないためスキップ: $boothId');
+          skipCount++;
+        }
+      }
+      
+      print('=== カスタムブースサイズの設定完了 ===');
+      print('成功: $successCount件, スキップ: $skipCount件');
+      
+      if (skipCount > 0) {
+        throw Exception('一部のブースが見つかりませんでした。先に「ブース情報初期化」を実行してください。(成功: $successCount件, スキップ: $skipCount件)');
+      }
+    } catch (e) {
+      print('カスタムブースサイズの設定中にエラーが発生しました: $e');
+      rethrow;
+    }
+  }
+
+  // ========================
+  // 教室レイアウト初期化
+  // ========================
+
+  /// 教室レイアウトに変更（既存のブース情報は保持）
+  Future<void> initializeClassroomLayout() async {
+    try {
+      print('=== 教室レイアウトの初期化開始 ===');
+      
+      // ステップ1: イベントレイアウトのサイズを更新（スクロール可能なサイズ）
+      final eventRef = _firestore.collection('event_layouts').doc('event_2025_default');
+      await eventRef.update({
+        'mapWidth': 400,  // 机の見切れを防ぐために幅を広げる
+        'mapHeight': 650,
+        'eventName': '2025年 教室実験',
+      });
+      print('マップサイズを更新: 700x900');
+      
+      // ステップ2: 既存のマップ要素を削除
+      final existingElements = await _firestore
+          .collection('map_elements')
+          .where('eventId', isEqualTo: 'event_2025_default')
+          .get();
+      
+      final deleteBatch = _firestore.batch();
+      for (final doc in existingElements.docs) {
+        deleteBatch.delete(doc.reference);
+      }
+      await deleteBatch.commit();
+      print('既存のマップ要素を削除: ${existingElements.docs.length}件');
+      
+      // ステップ3: 新しい教室レイアウトのマップ要素を作成（iPhone画面サイズに最適化）
+      final classroomElements = <Map<String, dynamic>>[
+        // 背景
+        {
+          'eventId': 'event_2025_default',
+          'type': 'background',
+          'shape': 'rect',
+          'x': 0,
+          'y': 0,
+          'width': 400,
+          'height': 650,
+          'color': '#FAFAFA',
+          'label': '背景',
+          'zIndex': 0,
+        },
+        
+        // 教室の外枠
+        {
+          'eventId': 'event_2025_default',
+          'type': 'wall',
+          'shape': 'rect',
+          'x': 10,
+          'y': 5,
+          'width': 380,
+          'height': 640,
+          'color': '#BDBDBD',
+          'strokeWidth': 2,
+          'filled': false,
+          'label': '教室外枠',
+          'zIndex': 1,
+        },
+        
+        // 教壇（上部中央）
+        {
+          'eventId': 'event_2025_default',
+          'type': 'entrance',
+          'shape': 'rect',
+          'x': 80,
+          'y': 30,
+          'width': 160,
+          'height': 30,
+          'color': '#A1887F',
+          'label': '教壇',
+          'zIndex': 2,
+        },
+        
+        // 横通路（上段と下段の机の間）
+        {
+          'eventId': 'event_2025_default',
+          'type': 'corridor',
+          'shape': 'rect',
+          'x': 10,
+          'y': 215,
+          'width': 380,
+          'height': 20,
+          'color': '#EEEEEE',
+          'label': '横通路（上段と下段の間）',
+          'zIndex': 1,
+        },
+        
+        // 縦通路1（左の通路：左端の細長い机と左の太い机の間）
+        {
+          'eventId': 'event_2025_default',
+          'type': 'corridor',
+          'shape': 'rect',
+          'x': 60,
+          'y': 5,
+          'width': 30,
+          'height': 640,
+          'color': '#EEEEEE',
+          'label': '左縦通路（ブース配置）',
+          'zIndex': 1,
+        },
+        
+        // 縦通路2（中央の通路：左の太い机と中央の太い机の間）
+        {
+          'eventId': 'event_2025_default',
+          'type': 'corridor',
+          'shape': 'rect',
+          'x': 170,
+          'y': 5,
+          'width': 20,
+          'height': 640,
+          'color': '#EEEEEE',
+          'label': '中央縦通路（ブース配置）',
+          'zIndex': 1,
+        },
+        
+        // 縦通路3（右の通路：中央の太い机と右端の細長い机の間）
+        {
+          'eventId': 'event_2025_default',
+          'type': 'corridor',
+          'shape': 'rect',
+          'x': 270,
+          'y': 5,
+          'width': 20,
+          'height': 640,
+          'color': '#EEEEEE',
+          'label': '右縦通路（ブース配置）',
+          'zIndex': 1,
+        },
+        
+        // === 机（マップ要素として描画）=== 合計8つ
+        
+        // 上段（教壇の下）- 4つの机
+        // 1. 左端の細長い机
+        {
+          'eventId': 'event_2025_default',
+          'type': 'wall',
+          'shape': 'rect',
+          'x': 25,
+          'y': 80,
+          'width': 30,
+          'height': 130,
+          'color': '#E0E0E0',
+          'strokeWidth': 2,
+          'filled': true,
+          'label': '左端上段机（細長い）',
+          'zIndex': 1,
+        },
+        // 2. 左の太い机（A09/A1用）
+        {
+          'eventId': 'event_2025_default',
+          'type': 'wall',
+          'shape': 'rect',
+          'x': 95,
+          'y': 80,
+          'width': 70,
+          'height': 130,
+          'color': '#E0E0E0',
+          'strokeWidth': 2,
+          'filled': true,
+          'label': '左列上段机（太い）',
+          'zIndex': 1,
+        },
+        // 3. 中央の太い机（A10/A8用）
+        {
+          'eventId': 'event_2025_default',
+          'type': 'wall',
+          'shape': 'rect',
+          'x': 195,
+          'y': 80,
+          'width': 70,
+          'height': 130,
+          'color': '#E0E0E0',
+          'strokeWidth': 2,
+          'filled': true,
+          'label': '中央列上段机（太い）',
+          'zIndex': 1,
+        },
+        // 4. 右端の細長い机
+        {
+          'eventId': 'event_2025_default',
+          'type': 'wall',
+          'shape': 'rect',
+          'x': 295,
+          'y': 80,
+          'width': 30,
+          'height': 130,
+          'color': '#E0E0E0',
+          'strokeWidth': 2,
+          'filled': true,
+          'label': '右端上段机（細長い）',
+          'zIndex': 1,
+        },
+        
+        // 下段（横通路の下）- 4つの机（上段より縦に長い）
+        // 5. 左端の細長い机
+        {
+          'eventId': 'event_2025_default',
+          'type': 'wall',
+          'shape': 'rect',
+          'x': 25,
+          'y': 240,
+          'width': 30,
+          'height': 380,
+          'color': '#E0E0E0',
+          'strokeWidth': 2,
+          'filled': true,
+          'label': '左端下段机（細長い）',
+          'zIndex': 1,
+        },
+        // 6. 左の太い机（A2/A3/A4用）
+        {
+          'eventId': 'event_2025_default',
+          'type': 'wall',
+          'shape': 'rect',
+          'x': 95,
+          'y': 240,
+          'width': 70,
+          'height': 380,
+          'color': '#E0E0E0',
+          'strokeWidth': 2,
+          'filled': true,
+          'label': '左列下段机（太い）',
+          'zIndex': 1,
+        },
+        // 7. 中央の太い机（A7/A6/A5用）
+        {
+          'eventId': 'event_2025_default',
+          'type': 'wall',
+          'shape': 'rect',
+          'x': 195,
+          'y': 240,
+          'width': 70,
+          'height': 380,
+          'color': '#E0E0E0',
+          'strokeWidth': 2,
+          'filled': true,
+          'label': '中央列下段机（太い）',
+          'zIndex': 1,
+        },
+        // 8. 右端の細長い机
+        {
+          'eventId': 'event_2025_default',
+          'type': 'wall',
+          'shape': 'rect',
+          'x': 295,
+          'y': 240,
+          'width': 30,
+          'height': 380,
+          'color': '#E0E0E0',
+          'strokeWidth': 2,
+          'filled': true,
+          'label': '右端下段机（細長い）',
+          'zIndex': 1,
+        },
+      ];
+      
+      // バッチで保存
+      final elementBatch = _firestore.batch();
+      int elementIndex = 0;
+      for (final element in classroomElements) {
+        final elementRef = _firestore.collection('map_elements').doc('classroom_element_${elementIndex++}');
+        elementBatch.set(elementRef, element);
+      }
+      await elementBatch.commit();
+      print('教室レイアウトのマップ要素を作成: ${classroomElements.length}件');
+      
+      // ステップ4: FSC-BP104Dの位置を左上（A09）に更新（左端の細長い机と左の太い机の間の通路の中央）
+      final fscBooth = await _firestore.collection('booths').doc('FSC-BP104D').get();
+      if (fscBooth.exists) {
+        await _firestore.collection('booths').doc('FSC-BP104D').update({
+          'x': 75,
+          'y': 105,
+          'width': 20,
+          'height': 20,
+          'shape': 'circle',
+          'name': 'ブースA09 (FSC-BP104D)',
+          'displayName': 'ブースA09',
+        });
+        print('FSC-BP104DをブースA09（左上、机の間の縦通路の中央）に配置');
+      }
+      
+      print('=== 教室レイアウトの初期化完了 ===');
+    } catch (e) {
+      print('教室レイアウトの初期化中にエラーが発生しました: $e');
+      throw Exception('教室レイアウトの初期化に失敗しました: $e');
+    }
+  }
+
+  /// 教室の全ブース座標を設定
+  Future<void> setupClassroomBooths() async {
+    try {
+      print('=== 教室ブース座標の設定開始 ===');
+      
+      // ステップ1: 既存のブースをすべて削除
+      print('既存のブースを削除中...');
+      final existingBooths = await _firestore.collection('booths').get();
+      final batch = _firestore.batch();
+      for (final doc in existingBooths.docs) {
+        batch.delete(doc.reference);
+      }
+      await batch.commit();
+      print('既存のブースを削除しました: ${existingBooths.docs.length}件');
+      
+      // ステップ2: 教室レイアウトに基づくブース座標マッピング（机と机の間の縦通路の中央に配置）
+      // ブースは小さな円形で、8つの机の間の通路の中央に配置（A09と同じ方法）
+      // 座標はiPhone画面サイズに最適化（400x650）
+      final boothPositions = {
+        // 左の縦通路（x=75）：左端の細長い机と左の太い机の間（通路の中央）
+        'FSC-BP104D': {'x': 75, 'y': 105, 'name': 'ブースA09', 'width': 20, 'height': 20},  // A09（左通路・上段上）
+        'Booth-A01': {'x': 75, 'y': 185, 'name': 'ブースA1', 'width': 20, 'height': 20},     // A1（左通路・上段下）
+        'Booth-A02': {'x': 75, 'y': 285, 'name': 'ブースA2', 'width': 20, 'height': 20},     // A2（左通路・下段上）
+        'Booth-A03': {'x': 75, 'y': 430, 'name': 'ブースA3', 'width': 20, 'height': 20},     // A3（左通路・下段中）
+        'Booth-A04': {'x': 75, 'y': 575, 'name': 'ブースA4', 'width': 20, 'height': 20},     // A4（左通路・下段下）
+        
+        // 中央の縦通路（x=180）：左の太い机と中央の太い机の間（通路の中央）
+        'Booth-A10': {'x': 180, 'y': 105, 'name': 'ブースA10', 'width': 20, 'height': 20},   // A10（中央通路・上段上）
+        'Booth-A08': {'x': 180, 'y': 185, 'name': 'ブースA8', 'width': 20, 'height': 20},    // A8（中央通路・上段下）
+        'Booth-A07': {'x': 180, 'y': 285, 'name': 'ブースA7', 'width': 20, 'height': 20},    // A7（中央通路・下段上）
+        'Booth-A06': {'x': 180, 'y': 430, 'name': 'ブースA6', 'width': 20, 'height': 20},    // A6（中央通路・下段中）
+        'Booth-A05': {'x': 180, 'y': 575, 'name': 'ブースA5', 'width': 20, 'height': 20},    // A5（中央通路・下段下）
+        
+        // 右の縦通路（x=280）：中央の太い机と右端の細長い机の間（通路の中央）
+        'Booth-A11': {'x': 280, 'y': 105, 'name': 'ブースA11', 'width': 20, 'height': 20},   // A11（右通路・上段上）
+        'Booth-A12': {'x': 280, 'y': 185, 'name': 'ブースA12', 'width': 20, 'height': 20},   // A12（右通路・上段下）
+        'Booth-A13': {'x': 280, 'y': 285, 'name': 'ブースA13', 'width': 20, 'height': 20},   // A13（右通路・下段上）
+        'Booth-A14': {'x': 280, 'y': 430, 'name': 'ブースA14', 'width': 20, 'height': 20},   // A14（右通路・下段中）
+        'Booth-A15': {'x': 280, 'y': 575, 'name': 'ブースA15 (FSC-BP103B)', 'width': 20, 'height': 20},   // A15（右通路・下段下、2台目のビーコン FSC-BP103B）
+      };
+      
+      // ステップ3: 新しいブースを作成
+      int createCount = 0;
+      final createBatch = _firestore.batch();
+      
+      for (final entry in boothPositions.entries) {
+        final boothId = entry.key;
+        final position = entry.value;
+        
+        final boothData = {
+          'x': position['x'],
+          'y': position['y'],
+          'name': position['name'],
+          'displayName': position['name'],
+          'width': position['width'],
+          'height': position['height'],
+          'shape': 'circle',
+          'type': 'booth',
+          'company': '準備中',
+          'description': '説明準備中',
+          'products': ['準備中'],
+          'contactEmail': 'info@example.com',
+          'website': 'https://example.com',
+          'features': [],
+        };
+        
+        final boothRef = _firestore.collection('booths').doc(boothId);
+        createBatch.set(boothRef, boothData);
+        print('🆕 ${position['name']} (${boothId}) を作成準備');
+        createCount++;
+      }
+      
+      await createBatch.commit();
+      print('=== 教室ブース座標の設定完了: ${createCount}件新規作成 ===');
+    } catch (e) {
+      print('教室ブース座標の設定中にエラーが発生しました: $e');
+      throw Exception('教室ブース座標の設定に失敗しました: $e');
     }
   }
 }

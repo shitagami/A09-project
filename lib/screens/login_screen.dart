@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/foundation.dart';
 import '../services/auth_service.dart';
 
 class LoginScreen extends StatefulWidget {
@@ -99,7 +100,12 @@ class _LoginScreenState extends State<LoginScreen> {
         Navigator.of(context).pushReplacementNamed('/exhibitor');
         break;
       case UserRole.organizer:
-        Navigator.of(context).pushReplacementNamed('/organizer');
+        // Webの場合はWebダッシュボードに遷移
+        if (kIsWeb) {
+          Navigator.of(context).pushReplacementNamed('/web_dashboard');
+        } else {
+          Navigator.of(context).pushReplacementNamed('/organizer');
+        }
         break;
       case UserRole.staff:
         Navigator.of(context).pushReplacementNamed('/staff');
