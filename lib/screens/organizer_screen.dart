@@ -25,7 +25,7 @@ class _OrganizerScreenState extends State<OrganizerScreen> with TickerProviderSt
   @override
   void initState() {
     super.initState();
-    _tabController = TabController(length: 6, vsync: this);
+    _tabController = TabController(length: 5, vsync: this);
     _tabController.addListener(() {
       setState(() {
         _selectedTabIndex = _tabController.index;
@@ -174,28 +174,31 @@ class _OrganizerScreenState extends State<OrganizerScreen> with TickerProviderSt
             Tab(text: 'attribute'),
             Tab(text: '企業属性'),
             Tab(text: '興味分野'),
-            Tab(text: 'performance'),
-            Tab(text: 'popularity'),
+            Tab(text: '行動データ'),
           ],
         ),
       ),
       body: _isLoading
           ? const Center(child: CircularProgressIndicator())
-          : TabBarView(
-              controller: _tabController,
-              children: [
-                _buildHeatmapTab(),
-                _buildAttributeTab(totalVisitors, genderData, ageData),
-                _buildCompanyAttributeTab(),
-                _buildInterestTab(),
-                _buildPerformanceTab(),
-                _buildPopularityTab(),
-              ],
+          : LayoutBuilder(
+              builder: (context, constraints) {
+                final isWideScreen = constraints.maxWidth > 800;
+                return TabBarView(
+                  controller: _tabController,
+                  children: [
+                    _buildHeatmapTab(isWideScreen),
+                    _buildAttributeTab(totalVisitors, genderData, ageData, isWideScreen),
+                    _buildCompanyAttributeTab(isWideScreen),
+                    _buildInterestTab(isWideScreen),
+                    _buildBehaviorDataTab(isWideScreen),
+                  ],
+                );
+              },
             ),
     );
   }
 
-  Widget _buildHeatmapTab() {
+  Widget _buildHeatmapTab(bool isWideScreen) {
     final totalCount = _getTotalCount();
     
     return Padding(
@@ -237,117 +240,181 @@ class _OrganizerScreenState extends State<OrganizerScreen> with TickerProviderSt
           
           const SizedBox(height: 24),
           
-          // 総合統計
-          Card(
-            color: Colors.purple.shade50,
-            child: Padding(
-              padding: const EdgeInsets.all(16.0),
-              child: Row(
-                children: [
-                  const Icon(Icons.analytics, size: 40, color: Colors.purple),
-                  const SizedBox(width: 16),
-                  Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      const Text(
-                        '今日の総受信数',
-                        style: TextStyle(
-                          fontSize: 16,
-                          color: Colors.grey,
-                        ),
-                      ),
-                      Text(
-                        '$totalCount回',
-                        style: const TextStyle(
-                          fontSize: 24,
-                          fontWeight: FontWeight.bold,
-                          color: Colors.purple,
-                        ),
-                      ),
-                    ],
-                  ),
-                ],
-              ),
-            ),
-          ),
-          
-          const SizedBox(height: 24),
-          
-          // 詳細統計
-          const Text(
-            'ビーコン別受信統計',
-            style: TextStyle(
-              fontSize: 20,
-              fontWeight: FontWeight.bold,
-            ),
-          ),
-          const SizedBox(height: 16),
-          
-          if (_todayStats.isEmpty)
-            const Card(
-              child: Padding(
-                padding: EdgeInsets.all(16.0),
-                child: Text(
-                  '今日の統計データはありません',
-                  style: TextStyle(fontSize: 16, color: Colors.grey),
-                ),
-              ),
-            )
-          else
-            Expanded(
-              child: ListView.builder(
-                itemCount: _todayStats.length,
-                itemBuilder: (context, index) {
-                  final deviceName = _todayStats.keys.elementAt(index);
-                  final data = _todayStats[deviceName] as Map<String, dynamic>;
-                  final count = data['count'] ?? 0;
-                  
-                  return Card(
-                    child: ListTile(
-                      leading: const Icon(Icons.bluetooth, color: Colors.purple),
-                      title: Text(deviceName),
-                      subtitle: Text('受信回数: $count回'),
-                      trailing: Row(
-                        mainAxisSize: MainAxisSize.min,
+          if (isWideScreen)
+            Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Expanded(
+                  child: Card(
+                    color: Colors.purple.shade50,
+                    child: Padding(
+                      padding: const EdgeInsets.all(16.0),
+                      child: Row(
                         children: [
-                          Text(
-                            '${((count / totalCount) * 100).toStringAsFixed(1)}%',
-                            style: const TextStyle(
-                              color: Colors.grey,
-                              fontSize: 12,
-                            ),
-                          ),
-                          const SizedBox(width: 8),
-                          Container(
-                            padding: const EdgeInsets.symmetric(
-                              horizontal: 12,
-                              vertical: 6,
-                            ),
-                            decoration: BoxDecoration(
-                              color: Colors.purple,
-                              borderRadius: BorderRadius.circular(20),
-                            ),
-                            child: Text(
-                              count.toString(),
-                              style: const TextStyle(
-                                color: Colors.white,
-                                fontWeight: FontWeight.bold,
+                          const Icon(Icons.analytics, size: 40, color: Colors.purple),
+                          const SizedBox(width: 16),
+                          Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              const Text(
+                                '今日の総受信数',
+                                style: TextStyle(
+                                  fontSize: 16,
+                                  color: Colors.grey,
+                                ),
                               ),
-                            ),
+                              Text(
+                                '$totalCount回',
+                                style: const TextStyle(
+                                  fontSize: 24,
+                                  fontWeight: FontWeight.bold,
+                                  color: Colors.purple,
+                                ),
+                              ),
+                            ],
                           ),
                         ],
                       ),
                     ),
-                  );
-                },
-              ),
+                  ),
+                ),
+                const SizedBox(width: 24),
+                Expanded(
+                  flex: 2,
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      const Text(
+                        'ビーコン別受信統計',
+                        style: TextStyle(
+                          fontSize: 20,
+                          fontWeight: FontWeight.bold,
+                        ),
+                      ),
+                      const SizedBox(height: 16),
+                      _buildBeaconList(totalCount),
+                    ],
+                  ),
+                ),
+              ],
+            )
+          else
+            Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Card(
+                  color: Colors.purple.shade50,
+                  child: Padding(
+                    padding: const EdgeInsets.all(16.0),
+                    child: Row(
+                      children: [
+                        const Icon(Icons.analytics, size: 40, color: Colors.purple),
+                        const SizedBox(width: 16),
+                        Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            const Text(
+                              '今日の総受信数',
+                              style: TextStyle(
+                                fontSize: 16,
+                                color: Colors.grey,
+                              ),
+                            ),
+                            Text(
+                              '$totalCount回',
+                              style: const TextStyle(
+                                fontSize: 24,
+                                fontWeight: FontWeight.bold,
+                                color: Colors.purple,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 24),
+                const Text(
+                  'ビーコン別受信統計',
+                  style: TextStyle(
+                    fontSize: 20,
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
+                const SizedBox(height: 16),
+                Expanded(child: _buildBeaconList(totalCount)),
+              ],
             ),
         ],
       ),
     );
   }
 
-  Widget _buildAttributeTab(int totalVisitors, Map<String, int> genderData, Map<String, int> ageData) {
+  Widget _buildBeaconList(int totalCount) {
+    if (_todayStats.isEmpty) {
+      return const Card(
+        child: Padding(
+          padding: EdgeInsets.all(16.0),
+          child: Text(
+            '今日の統計データはありません',
+            style: TextStyle(fontSize: 16, color: Colors.grey),
+          ),
+        ),
+      );
+    }
+
+    return ListView.builder(
+      shrinkWrap: true,
+      physics: const NeverScrollableScrollPhysics(),
+      itemCount: _todayStats.length,
+      itemBuilder: (context, index) {
+        final deviceName = _todayStats.keys.elementAt(index);
+        final data = _todayStats[deviceName] as Map<String, dynamic>;
+        final count = data['count'] ?? 0;
+        
+        return Card(
+          child: ListTile(
+            leading: const Icon(Icons.bluetooth, color: Colors.purple),
+            title: Text(deviceName),
+            subtitle: Text('受信回数: $count回'),
+            trailing: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text(
+                  '${totalCount > 0 ? ((count / totalCount) * 100).toStringAsFixed(1) : '0'}%',
+                  style: const TextStyle(
+                    color: Colors.grey,
+                    fontSize: 12,
+                  ),
+                ),
+                const SizedBox(width: 8),
+                Container(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 12,
+                    vertical: 6,
+                  ),
+                  decoration: BoxDecoration(
+                    color: Colors.purple,
+                    borderRadius: BorderRadius.circular(20),
+                  ),
+                  child: Text(
+                    count.toString(),
+                    style: const TextStyle(
+                      color: Colors.white,
+                      fontWeight: FontWeight.bold,
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        );
+      },
+    );
+  }
+
+  Widget _buildAttributeTab(int totalVisitors, Map<String, int> genderData, Map<String, int> ageData, bool isWideScreen) {
     return SingleChildScrollView(
       padding: const EdgeInsets.all(16.0),
       child: Column(
@@ -431,108 +498,23 @@ class _OrganizerScreenState extends State<OrganizerScreen> with TickerProviderSt
           
           const SizedBox(height: 24),
           
-          // 性別分布
-          Card(
-            child: Padding(
-              padding: const EdgeInsets.all(16.0),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  const Text(
-                    '性別分布',
-                    style: TextStyle(
-                      fontSize: 18,
-                      fontWeight: FontWeight.bold,
-                    ),
-                  ),
-                  const SizedBox(height: 16),
-                  if (genderData.isEmpty)
-                    const Text(
-                      '性別データがありません',
-                      style: TextStyle(color: Colors.grey),
-                    )
-                  else
-                    SizedBox(
-                      height: 200,
-                      child: Row(
-                        children: [
-                          Expanded(
-                            flex: 2,
-                            child: CustomPaint(
-                              painter: GenderPieChartPainter(genderData, totalVisitors),
-                              size: const Size(200, 200),
-                            ),
-                          ),
-                          Expanded(
-                            child: Column(
-                              mainAxisAlignment: MainAxisAlignment.center,
-                              children: genderData.entries.map((entry) {
-                                final color = _getGenderColor(entry.key);
-                                final percentage = totalVisitors > 0 
-                                    ? ((entry.value / totalVisitors) * 100).toStringAsFixed(0)
-                                    : '0';
-                                return Padding(
-                                  padding: const EdgeInsets.symmetric(vertical: 4),
-                                  child: Row(
-                                    children: [
-                                      Container(
-                                        width: 12,
-                                        height: 12,
-                                        decoration: BoxDecoration(
-                                          color: color,
-                                          shape: BoxShape.circle,
-                                        ),
-                                      ),
-                                      const SizedBox(width: 8),
-                                      Text('${entry.key} ${percentage}%'),
-                                    ],
-                                  ),
-                                );
-                              }).toList(),
-                            ),
-                          ),
-                        ],
-                      ),
-                    ),
-                ],
-              ),
+          if (isWideScreen)
+            Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Expanded(child: _buildGenderChart(genderData, totalVisitors)),
+                const SizedBox(width: 24),
+                Expanded(child: _buildAgeChart(ageData)),
+              ],
+            )
+          else
+            Column(
+              children: [
+                _buildGenderChart(genderData, totalVisitors),
+                const SizedBox(height: 24),
+                _buildAgeChart(ageData),
+              ],
             ),
-          ),
-          
-          const SizedBox(height: 24),
-          
-          // 年齢分布
-          Card(
-            child: Padding(
-              padding: const EdgeInsets.all(16.0),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  const Text(
-                    '年齢分布',
-                    style: TextStyle(
-                      fontSize: 18,
-                      fontWeight: FontWeight.bold,
-                    ),
-                  ),
-                  const SizedBox(height: 16),
-                  if (ageData.isEmpty)
-                    const Text(
-                      '年齢データがありません',
-                      style: TextStyle(color: Colors.grey),
-                    )
-                  else
-                    SizedBox(
-                      height: 200,
-                      child: CustomPaint(
-                        painter: AgeBarChartPainter(ageData),
-                        size: const Size(double.infinity, 200),
-                      ),
-                    ),
-                ],
-              ),
-            ),
-          ),
           
           const SizedBox(height: 24),
           
@@ -568,6 +550,109 @@ class _OrganizerScreenState extends State<OrganizerScreen> with TickerProviderSt
           
           const SizedBox(height: 100), // 下部の余白
         ],
+      ),
+    );
+  }
+
+  Widget _buildGenderChart(Map<String, int> genderData, int totalVisitors) {
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(16.0),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Text(
+              '性別分布',
+              style: TextStyle(
+                fontSize: 18,
+                fontWeight: FontWeight.bold,
+              ),
+            ),
+            const SizedBox(height: 16),
+            if (genderData.isEmpty)
+              const Text(
+                '性別データがありません',
+                style: TextStyle(color: Colors.grey),
+              )
+            else
+              SizedBox(
+                height: 200,
+                child: Row(
+                  children: [
+                    Expanded(
+                      flex: 2,
+                      child: CustomPaint(
+                        painter: GenderPieChartPainter(genderData, totalVisitors),
+                        size: const Size(200, 200),
+                      ),
+                    ),
+                    Expanded(
+                      child: Column(
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        children: genderData.entries.map((entry) {
+                          final color = _getGenderColor(entry.key);
+                          final percentage = totalVisitors > 0 
+                              ? ((entry.value / totalVisitors) * 100).toStringAsFixed(0)
+                              : '0';
+                          return Padding(
+                            padding: const EdgeInsets.symmetric(vertical: 4),
+                            child: Row(
+                              children: [
+                                Container(
+                                  width: 12,
+                                  height: 12,
+                                  decoration: BoxDecoration(
+                                    color: color,
+                                    shape: BoxShape.circle,
+                                  ),
+                                ),
+                                const SizedBox(width: 8),
+                                Text('${entry.key} ${percentage}%'),
+                              ],
+                            ),
+                          );
+                        }).toList(),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildAgeChart(Map<String, int> ageData) {
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(16.0),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Text(
+              '年齢分布',
+              style: TextStyle(
+                fontSize: 18,
+                fontWeight: FontWeight.bold,
+              ),
+            ),
+            const SizedBox(height: 16),
+            if (ageData.isEmpty)
+              const Text(
+                '年齢データがありません',
+                style: TextStyle(color: Colors.grey),
+              )
+            else
+              SizedBox(
+                height: 200,
+                child: CustomPaint(
+                  painter: AgeBarChartPainter(ageData),
+                  size: const Size(double.infinity, 200),
+                ),
+              ),
+          ],
+        ),
       ),
     );
   }
@@ -613,7 +698,7 @@ class _OrganizerScreenState extends State<OrganizerScreen> with TickerProviderSt
     return ((count / _visitorData.length) * 100);
   }
 
-  Widget _buildCompanyAttributeTab() {
+  Widget _buildCompanyAttributeTab(bool isWideScreen) {
     final industryData = _companyAttributeStats['industry'] as Map<String, int>? ?? {};
     final positionData = _companyAttributeStats['position'] as Map<String, int>? ?? {};
     final jobData = _companyAttributeStats['job'] as Map<String, int>? ?? {};
@@ -673,310 +758,341 @@ class _OrganizerScreenState extends State<OrganizerScreen> with TickerProviderSt
           
           const SizedBox(height: 24),
           
-          // 業種別分布（円グラフ）
-          Card(
-            child: Padding(
-              padding: const EdgeInsets.all(16.0),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  const Text(
-                    '業種別分布',
-                    style: TextStyle(
-                      fontSize: 20,
-                      fontWeight: FontWeight.bold,
-                    ),
-                  ),
-                  const SizedBox(height: 16),
-                  if (industryData.isEmpty)
-                    const Center(
-                      child: Padding(
-                        padding: EdgeInsets.all(32.0),
-                        child: Text(
-                          '業種データがありません',
-                          style: TextStyle(color: Colors.grey),
-                        ),
-                      ),
-                    )
-                  else
-                    Column(
-                      children: [
-                        SizedBox(
-                          height: 250,
-                          child: PieChart(
-                            PieChartData(
-                              sections: _createIndustryPieChartSections(industryData, totalVisitors),
-                              sectionsSpace: 2,
-                              centerSpaceRadius: 50,
-                              borderData: FlBorderData(show: false),
-                              pieTouchData: PieTouchData(
-                                touchCallback: (FlTouchEvent event, pieTouchResponse) {},
-                              ),
-                            ),
-                          ),
-                        ),
-                        const SizedBox(height: 16),
-                        _buildLegend(industryData, totalVisitors, _getIndustryColor),
-                      ],
-                    ),
-                ],
-              ),
+          if (isWideScreen) ...[
+            Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Expanded(child: _buildIndustryChart(industryData, totalVisitors)),
+                const SizedBox(width: 24),
+                Expanded(child: _buildPositionChart(positionData)),
+              ],
             ),
-          ),
-          
-          const SizedBox(height: 24),
-          
-          // 役職別分布（棒グラフ）
-          Card(
-            child: Padding(
-              padding: const EdgeInsets.all(16.0),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  const Text(
-                    '役職別分布',
-                    style: TextStyle(
-                      fontSize: 20,
-                      fontWeight: FontWeight.bold,
-                    ),
-                  ),
-                  const SizedBox(height: 16),
-                  if (positionData.isEmpty)
-                    const Center(
-                      child: Padding(
-                        padding: EdgeInsets.all(32.0),
-                        child: Text(
-                          '役職データがありません',
-                          style: TextStyle(color: Colors.grey),
-                        ),
-                      ),
-                    )
-                  else
-                    SizedBox(
-                      height: 300,
-                      child: BarChart(
-                        BarChartData(
-                          alignment: BarChartAlignment.spaceAround,
-                          maxY: positionData.values.reduce(math.max).toDouble() * 1.2,
-                          barTouchData: BarTouchData(
-                            enabled: true,
-                            touchTooltipData: BarTouchTooltipData(
-                              getTooltipItem: (group, groupIndex, rod, rodIndex) {
-                                final position = positionData.keys.elementAt(groupIndex);
-                                return BarTooltipItem(
-                                  '$position\n${rod.toY.toInt()}人',
-                                  const TextStyle(color: Colors.white, fontWeight: FontWeight.bold),
-                                );
-                              },
-                            ),
-                          ),
-                          titlesData: FlTitlesData(
-                            show: true,
-                            bottomTitles: AxisTitles(
-                              sideTitles: SideTitles(
-                                showTitles: true,
-                                getTitlesWidget: (value, meta) {
-                                  final index = value.toInt();
-                                  if (index >= 0 && index < positionData.length) {
-                                    final position = positionData.keys.elementAt(index);
-                                    return Padding(
-                                      padding: const EdgeInsets.only(top: 8.0),
-                                      child: Text(
-                                        position,
-                                        style: const TextStyle(fontSize: 10),
-                                        textAlign: TextAlign.center,
-                                      ),
-                                    );
-                                  }
-                                  return const Text('');
-                                },
-                                reservedSize: 30,
-                              ),
-                            ),
-                            leftTitles: AxisTitles(
-                              sideTitles: SideTitles(
-                                showTitles: true,
-                                reservedSize: 40,
-                                getTitlesWidget: (value, meta) {
-                                  return Text(
-                                    value.toInt().toString(),
-                                    style: const TextStyle(fontSize: 10),
-                                  );
-                                },
-                              ),
-                            ),
-                            topTitles: const AxisTitles(
-                              sideTitles: SideTitles(showTitles: false),
-                            ),
-                            rightTitles: const AxisTitles(
-                              sideTitles: SideTitles(showTitles: false),
-                            ),
-                          ),
-                          borderData: FlBorderData(show: false),
-                          barGroups: _createPositionBarGroups(positionData),
-                          gridData: FlGridData(
-                            show: true,
-                            drawVerticalLine: false,
-                            horizontalInterval: 5,
-                            getDrawingHorizontalLine: (value) {
-                              return FlLine(
-                                color: Colors.grey.shade300,
-                                strokeWidth: 1,
-                              );
-                            },
-                          ),
-                        ),
-                      ),
-                    ),
-                ],
-              ),
+            const SizedBox(height: 24),
+            Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Expanded(child: _buildJobChart(jobData)),
+                const SizedBox(width: 24),
+                Expanded(child: _buildSummaryStats(industryData, positionData, jobData, totalVisitors)),
+              ],
             ),
-          ),
-          
-          const SizedBox(height: 24),
-          
-          // 職業別分布（横棒グラフ）
-          Card(
-            child: Padding(
-              padding: const EdgeInsets.all(16.0),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  const Text(
-                    '職業別分布',
-                    style: TextStyle(
-                      fontSize: 20,
-                      fontWeight: FontWeight.bold,
-                    ),
-                  ),
-                  const SizedBox(height: 16),
-                  if (jobData.isEmpty)
-                    const Center(
-                      child: Padding(
-                        padding: EdgeInsets.all(32.0),
-                        child: Text(
-                          '職業データがありません',
-                          style: TextStyle(color: Colors.grey),
-                        ),
-                      ),
-                    )
-                  else
-                    SizedBox(
-                      height: math.max(300, jobData.length * 40.0),
-                      child: BarChart(
-                        BarChartData(
-                          alignment: BarChartAlignment.spaceAround,
-                          maxY: jobData.values.reduce(math.max).toDouble() * 1.2,
-                          barTouchData: BarTouchData(
-                            enabled: true,
-                            touchTooltipData: BarTouchTooltipData(
-                              getTooltipItem: (group, groupIndex, rod, rodIndex) {
-                                final job = jobData.keys.elementAt(groupIndex);
-                                return BarTooltipItem(
-                                  '$job\n${rod.toY.toInt()}人',
-                                  const TextStyle(color: Colors.white, fontWeight: FontWeight.bold),
-                                );
-                              },
-                            ),
-                          ),
-                          titlesData: FlTitlesData(
-                            show: true,
-                            bottomTitles: AxisTitles(
-                              sideTitles: SideTitles(
-                                showTitles: true,
-                                getTitlesWidget: (value, meta) {
-                                  final index = value.toInt();
-                                  if (index >= 0 && index < jobData.length) {
-                                    final job = jobData.keys.elementAt(index);
-                                    return Padding(
-                                      padding: const EdgeInsets.only(top: 8.0),
-                                      child: Text(
-                                        job,
-                                        style: const TextStyle(fontSize: 10),
-                                        textAlign: TextAlign.center,
-                                      ),
-                                    );
-                                  }
-                                  return const Text('');
-                                },
-                                reservedSize: 30,
-                              ),
-                            ),
-                            leftTitles: AxisTitles(
-                              sideTitles: SideTitles(
-                                showTitles: true,
-                                reservedSize: 40,
-                                getTitlesWidget: (value, meta) {
-                                  return Text(
-                                    value.toInt().toString(),
-                                    style: const TextStyle(fontSize: 10),
-                                  );
-                                },
-                              ),
-                            ),
-                            topTitles: const AxisTitles(
-                              sideTitles: SideTitles(showTitles: false),
-                            ),
-                            rightTitles: const AxisTitles(
-                              sideTitles: SideTitles(showTitles: false),
-                            ),
-                          ),
-                          borderData: FlBorderData(show: false),
-                          barGroups: _createJobBarGroups(jobData),
-                          gridData: FlGridData(
-                            show: true,
-                            drawVerticalLine: false,
-                            horizontalInterval: 5,
-                            getDrawingHorizontalLine: (value) {
-                              return FlLine(
-                                color: Colors.grey.shade300,
-                                strokeWidth: 1,
-                              );
-                            },
-                          ),
-                        ),
-                      ),
-                    ),
-                ],
-              ),
-            ),
-          ),
-          
-          const SizedBox(height: 24),
-          
-          // サマリー統計
-          Card(
-            child: Padding(
-              padding: const EdgeInsets.all(16.0),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  const Text(
-                    'サマリー統計',
-                    style: TextStyle(
-                      fontSize: 20,
-                      fontWeight: FontWeight.bold,
-                    ),
-                  ),
-                  const SizedBox(height: 16),
-                  if (totalVisitors > 0) ...[
-                    _buildStatRow('最多業種', _getMostCommon(industryData)),
-                    _buildStatRow('最多役職', _getMostCommon(positionData)),
-                    _buildStatRow('最多職業', _getMostCommon(jobData)),
-                    _buildStatRow('業種種類数', '${industryData.length}種類'),
-                    _buildStatRow('役職種類数', '${positionData.length}種類'),
-                  ] else
-                    const Text(
-                      '来場者データがありません',
-                      style: TextStyle(color: Colors.grey),
-                    ),
-                ],
-              ),
-            ),
-          ),
+          ] else ...[
+            _buildIndustryChart(industryData, totalVisitors),
+            const SizedBox(height: 24),
+            _buildPositionChart(positionData),
+            const SizedBox(height: 24),
+            _buildJobChart(jobData),
+            const SizedBox(height: 24),
+            _buildSummaryStats(industryData, positionData, jobData, totalVisitors),
+          ],
           
           const SizedBox(height: 100), // 下部の余白
         ],
+      ),
+    );
+  }
+
+  Widget _buildIndustryChart(Map<String, int> industryData, int totalVisitors) {
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(16.0),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Text(
+              '業種別分布',
+              style: TextStyle(
+                fontSize: 20,
+                fontWeight: FontWeight.bold,
+              ),
+            ),
+            const SizedBox(height: 16),
+            if (industryData.isEmpty)
+              const Center(
+                child: Padding(
+                  padding: EdgeInsets.all(32.0),
+                  child: Text(
+                    '業種データがありません',
+                    style: TextStyle(color: Colors.grey),
+                  ),
+                ),
+              )
+            else
+              Column(
+                children: [
+                  SizedBox(
+                    height: 250,
+                    child: PieChart(
+                      PieChartData(
+                        sections: _createIndustryPieChartSections(industryData, totalVisitors),
+                        sectionsSpace: 2,
+                        centerSpaceRadius: 50,
+                        borderData: FlBorderData(show: false),
+                        pieTouchData: PieTouchData(
+                          touchCallback: (FlTouchEvent event, pieTouchResponse) {},
+                        ),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 16),
+                  _buildLegend(industryData, totalVisitors, _getIndustryColor),
+                ],
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildPositionChart(Map<String, int> positionData) {
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(16.0),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Text(
+              '役職別分布',
+              style: TextStyle(
+                fontSize: 20,
+                fontWeight: FontWeight.bold,
+              ),
+            ),
+            const SizedBox(height: 16),
+            if (positionData.isEmpty)
+              const Center(
+                child: Padding(
+                  padding: EdgeInsets.all(32.0),
+                  child: Text(
+                    '役職データがありません',
+                    style: TextStyle(color: Colors.grey),
+                  ),
+                ),
+              )
+            else
+              SizedBox(
+                height: 300,
+                child: BarChart(
+                  BarChartData(
+                    alignment: BarChartAlignment.spaceAround,
+                    maxY: positionData.values.reduce(math.max).toDouble() * 1.2,
+                    barTouchData: BarTouchData(
+                      enabled: true,
+                      touchTooltipData: BarTouchTooltipData(
+                        getTooltipItem: (group, groupIndex, rod, rodIndex) {
+                          final position = positionData.keys.elementAt(groupIndex);
+                          return BarTooltipItem(
+                            '$position\n${rod.toY.toInt()}人',
+                            const TextStyle(color: Colors.white, fontWeight: FontWeight.bold),
+                          );
+                        },
+                      ),
+                    ),
+                    titlesData: FlTitlesData(
+                      show: true,
+                      bottomTitles: AxisTitles(
+                        sideTitles: SideTitles(
+                          showTitles: true,
+                          getTitlesWidget: (value, meta) {
+                            final index = value.toInt();
+                            if (index >= 0 && index < positionData.length) {
+                              final position = positionData.keys.elementAt(index);
+                              return Padding(
+                                padding: const EdgeInsets.only(top: 8.0),
+                                child: Text(
+                                  position,
+                                  style: const TextStyle(fontSize: 10),
+                                  textAlign: TextAlign.center,
+                                ),
+                              );
+                            }
+                            return const Text('');
+                          },
+                          reservedSize: 30,
+                        ),
+                      ),
+                      leftTitles: AxisTitles(
+                        sideTitles: SideTitles(
+                          showTitles: true,
+                          reservedSize: 40,
+                          getTitlesWidget: (value, meta) {
+                            return Text(
+                              value.toInt().toString(),
+                              style: const TextStyle(fontSize: 10),
+                            );
+                          },
+                        ),
+                      ),
+                      topTitles: const AxisTitles(
+                        sideTitles: SideTitles(showTitles: false),
+                      ),
+                      rightTitles: const AxisTitles(
+                        sideTitles: SideTitles(showTitles: false),
+                      ),
+                    ),
+                    borderData: FlBorderData(show: false),
+                    barGroups: _createPositionBarGroups(positionData),
+                    gridData: FlGridData(
+                      show: true,
+                      drawVerticalLine: false,
+                      horizontalInterval: 5,
+                      getDrawingHorizontalLine: (value) {
+                        return FlLine(
+                          color: Colors.grey.shade300,
+                          strokeWidth: 1,
+                        );
+                      },
+                    ),
+                  ),
+                ),
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildJobChart(Map<String, int> jobData) {
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(16.0),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Text(
+              '職業別分布',
+              style: TextStyle(
+                fontSize: 20,
+                fontWeight: FontWeight.bold,
+              ),
+            ),
+            const SizedBox(height: 16),
+            if (jobData.isEmpty)
+              const Center(
+                child: Padding(
+                  padding: EdgeInsets.all(32.0),
+                  child: Text(
+                    '職業データがありません',
+                    style: TextStyle(color: Colors.grey),
+                  ),
+                ),
+              )
+            else
+              SizedBox(
+                height: math.max(300, jobData.length * 40.0),
+                child: BarChart(
+                  BarChartData(
+                    alignment: BarChartAlignment.spaceAround,
+                    maxY: jobData.values.reduce(math.max).toDouble() * 1.2,
+                    barTouchData: BarTouchData(
+                      enabled: true,
+                      touchTooltipData: BarTouchTooltipData(
+                        getTooltipItem: (group, groupIndex, rod, rodIndex) {
+                          final job = jobData.keys.elementAt(groupIndex);
+                          return BarTooltipItem(
+                            '$job\n${rod.toY.toInt()}人',
+                            const TextStyle(color: Colors.white, fontWeight: FontWeight.bold),
+                          );
+                        },
+                      ),
+                    ),
+                    titlesData: FlTitlesData(
+                      show: true,
+                      bottomTitles: AxisTitles(
+                        sideTitles: SideTitles(
+                          showTitles: true,
+                          getTitlesWidget: (value, meta) {
+                            final index = value.toInt();
+                            if (index >= 0 && index < jobData.length) {
+                              final job = jobData.keys.elementAt(index);
+                              return Padding(
+                                padding: const EdgeInsets.only(top: 8.0),
+                                child: Text(
+                                  job,
+                                  style: const TextStyle(fontSize: 10),
+                                  textAlign: TextAlign.center,
+                                ),
+                              );
+                            }
+                            return const Text('');
+                          },
+                          reservedSize: 30,
+                        ),
+                      ),
+                      leftTitles: AxisTitles(
+                        sideTitles: SideTitles(
+                          showTitles: true,
+                          reservedSize: 40,
+                          getTitlesWidget: (value, meta) {
+                            return Text(
+                              value.toInt().toString(),
+                              style: const TextStyle(fontSize: 10),
+                            );
+                          },
+                        ),
+                      ),
+                      topTitles: const AxisTitles(
+                        sideTitles: SideTitles(showTitles: false),
+                      ),
+                      rightTitles: const AxisTitles(
+                        sideTitles: SideTitles(showTitles: false),
+                      ),
+                    ),
+                    borderData: FlBorderData(show: false),
+                    barGroups: _createJobBarGroups(jobData),
+                    gridData: FlGridData(
+                      show: true,
+                      drawVerticalLine: false,
+                      horizontalInterval: 5,
+                      getDrawingHorizontalLine: (value) {
+                        return FlLine(
+                          color: Colors.grey.shade300,
+                          strokeWidth: 1,
+                        );
+                      },
+                    ),
+                  ),
+                ),
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildSummaryStats(
+    Map<String, int> industryData,
+    Map<String, int> positionData,
+    Map<String, int> jobData,
+    int totalVisitors,
+  ) {
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(16.0),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Text(
+              'サマリー統計',
+              style: TextStyle(
+                fontSize: 20,
+                fontWeight: FontWeight.bold,
+              ),
+            ),
+            const SizedBox(height: 16),
+            if (totalVisitors > 0) ...[
+              _buildStatRow('最多業種', _getMostCommon(industryData)),
+              _buildStatRow('最多役職', _getMostCommon(positionData)),
+              _buildStatRow('最多職業', _getMostCommon(jobData)),
+              _buildStatRow('業種種類数', '${industryData.length}種類'),
+              _buildStatRow('役職種類数', '${positionData.length}種類'),
+            ] else
+              const Text(
+                '来場者データがありません',
+                style: TextStyle(color: Colors.grey),
+              ),
+          ],
+        ),
       ),
     );
   }
@@ -1167,7 +1283,7 @@ class _OrganizerScreenState extends State<OrganizerScreen> with TickerProviderSt
     return data.entries.reduce((a, b) => a.value > b.value ? a : b).key;
   }
 
-  Widget _buildInterestTab() {
+  Widget _buildInterestTab(bool isWideScreen) {
     final interestData = _companyAttributeStats['interests'] as Map<String, int>? ?? {};
     final totalVisitors = _companyAttributeStats['totalVisitors'] as int? ?? 0;
     
@@ -1254,151 +1370,395 @@ class _OrganizerScreenState extends State<OrganizerScreen> with TickerProviderSt
           
           const SizedBox(height: 24),
           
-          // 興味のある分野別分布（棒グラフ）
-          Card(
-            child: Padding(
-              padding: const EdgeInsets.all(16.0),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  const Text(
-                    '興味のある分野別分布',
-                    style: TextStyle(
-                      fontSize: 20,
-                      fontWeight: FontWeight.bold,
+          if (isWideScreen)
+            Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Expanded(child: _buildInterestChart(interestData, totalSelections)),
+                const SizedBox(width: 24),
+                Expanded(child: _buildInterestSummary(interestData, totalVisitors, totalSelections)),
+              ],
+            )
+          else
+            Column(
+              children: [
+                _buildInterestChart(interestData, totalSelections),
+                const SizedBox(height: 24),
+                _buildInterestSummary(interestData, totalVisitors, totalSelections),
+              ],
+            ),
+          
+          const SizedBox(height: 100), // 下部の余白
+        ],
+      ),
+    );
+  }
+
+  Widget _buildInterestChart(Map<String, int> interestData, int totalSelections) {
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(16.0),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Text(
+              '興味のある分野別分布',
+              style: TextStyle(
+                fontSize: 20,
+                fontWeight: FontWeight.bold,
+              ),
+            ),
+            const SizedBox(height: 16),
+            if (interestData.isEmpty)
+              const Center(
+                child: Padding(
+                  padding: EdgeInsets.all(32.0),
+                  child: Text(
+                    '興味分野データがありません',
+                    style: TextStyle(color: Colors.grey),
+                  ),
+                ),
+              )
+            else
+              SizedBox(
+                height: math.max(300, interestData.length * 40.0),
+                child: BarChart(
+                  BarChartData(
+                    alignment: BarChartAlignment.spaceAround,
+                    maxY: interestData.values.reduce(math.max).toDouble() * 1.2,
+                    barTouchData: BarTouchData(
+                      enabled: true,
+                      touchTooltipData: BarTouchTooltipData(
+                        getTooltipItem: (group, groupIndex, rod, rodIndex) {
+                          final interest = interestData.keys.elementAt(groupIndex);
+                          final percentage = totalSelections > 0 
+                              ? ((rod.toY / totalSelections) * 100).toStringAsFixed(1)
+                              : '0.0';
+                          return BarTooltipItem(
+                            '$interest\n${rod.toY.toInt()}人 ($percentage%)',
+                            const TextStyle(color: Colors.white, fontWeight: FontWeight.bold),
+                          );
+                        },
+                      ),
+                    ),
+                    titlesData: FlTitlesData(
+                      show: true,
+                      bottomTitles: AxisTitles(
+                        sideTitles: SideTitles(
+                          showTitles: true,
+                          getTitlesWidget: (value, meta) {
+                            final index = value.toInt();
+                            if (index >= 0 && index < interestData.length) {
+                              final interest = interestData.keys.elementAt(index);
+                              return Padding(
+                                padding: const EdgeInsets.only(top: 8.0),
+                                child: Text(
+                                  interest,
+                                  style: const TextStyle(fontSize: 10),
+                                  textAlign: TextAlign.center,
+                                ),
+                              );
+                            }
+                            return const Text('');
+                          },
+                          reservedSize: 40,
+                        ),
+                      ),
+                      leftTitles: AxisTitles(
+                        sideTitles: SideTitles(
+                          showTitles: true,
+                          reservedSize: 40,
+                          getTitlesWidget: (value, meta) {
+                            return Text(
+                              value.toInt().toString(),
+                              style: const TextStyle(fontSize: 10),
+                            );
+                          },
+                        ),
+                      ),
+                      topTitles: const AxisTitles(
+                        sideTitles: SideTitles(showTitles: false),
+                      ),
+                      rightTitles: const AxisTitles(
+                        sideTitles: SideTitles(showTitles: false),
+                      ),
+                    ),
+                    borderData: FlBorderData(show: false),
+                    barGroups: _createInterestBarGroups(interestData),
+                    gridData: FlGridData(
+                      show: true,
+                      drawVerticalLine: false,
+                      horizontalInterval: 10,
+                      getDrawingHorizontalLine: (value) {
+                        return FlLine(
+                          color: Colors.grey.shade300,
+                          strokeWidth: 1,
+                        );
+                      },
                     ),
                   ),
-                  const SizedBox(height: 16),
-                  if (interestData.isEmpty)
-                    const Center(
-                      child: Padding(
-                        padding: EdgeInsets.all(32.0),
-                        child: Text(
-                          '興味分野データがありません',
-                          style: TextStyle(color: Colors.grey),
-                        ),
-                      ),
-                    )
-                  else
-                    SizedBox(
-                      height: math.max(300, interestData.length * 40.0),
-                      child: BarChart(
-                        BarChartData(
-                          alignment: BarChartAlignment.spaceAround,
-                          maxY: interestData.values.reduce(math.max).toDouble() * 1.2,
-                          barTouchData: BarTouchData(
-                            enabled: true,
-                            touchTooltipData: BarTouchTooltipData(
-                              getTooltipItem: (group, groupIndex, rod, rodIndex) {
-                                final interest = interestData.keys.elementAt(groupIndex);
-                                final percentage = totalSelections > 0 
-                                    ? ((rod.toY / totalSelections) * 100).toStringAsFixed(1)
-                                    : '0.0';
-                                return BarTooltipItem(
-                                  '$interest\n${rod.toY.toInt()}人 ($percentage%)',
-                                  const TextStyle(color: Colors.white, fontWeight: FontWeight.bold),
-                                );
-                              },
-                            ),
-                          ),
-                          titlesData: FlTitlesData(
-                            show: true,
-                            bottomTitles: AxisTitles(
-                              sideTitles: SideTitles(
-                                showTitles: true,
-                                getTitlesWidget: (value, meta) {
-                                  final index = value.toInt();
-                                  if (index >= 0 && index < interestData.length) {
-                                    final interest = interestData.keys.elementAt(index);
-                                    return Padding(
-                                      padding: const EdgeInsets.only(top: 8.0),
-                                      child: Text(
-                                        interest,
-                                        style: const TextStyle(fontSize: 10),
-                                        textAlign: TextAlign.center,
-                                      ),
-                                    );
-                                  }
-                                  return const Text('');
-                                },
-                                reservedSize: 40,
-                              ),
-                            ),
-                            leftTitles: AxisTitles(
-                              sideTitles: SideTitles(
-                                showTitles: true,
-                                reservedSize: 40,
-                                getTitlesWidget: (value, meta) {
-                                  return Text(
-                                    value.toInt().toString(),
-                                    style: const TextStyle(fontSize: 10),
-                                  );
-                                },
-                              ),
-                            ),
-                            topTitles: const AxisTitles(
-                              sideTitles: SideTitles(showTitles: false),
-                            ),
-                            rightTitles: const AxisTitles(
-                              sideTitles: SideTitles(showTitles: false),
-                            ),
-                          ),
-                          borderData: FlBorderData(show: false),
-                          barGroups: _createInterestBarGroups(interestData),
-                          gridData: FlGridData(
-                            show: true,
-                            drawVerticalLine: false,
-                            horizontalInterval: 10,
-                            getDrawingHorizontalLine: (value) {
-                              return FlLine(
-                                color: Colors.grey.shade300,
-                                strokeWidth: 1,
-                              );
-                            },
-                          ),
-                        ),
-                      ),
+                ),
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildInterestSummary(Map<String, int> interestData, int totalVisitors, int totalSelections) {
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(16.0),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Text(
+              'サマリー統計',
+              style: TextStyle(
+                fontSize: 20,
+                fontWeight: FontWeight.bold,
+              ),
+            ),
+            const SizedBox(height: 16),
+            if (totalVisitors > 0 && interestData.isNotEmpty) ...[
+              _buildStatRow('最多興味分野', _getMostCommon(interestData)),
+              _buildStatRow('総来場者数', '$totalVisitors人'),
+              _buildStatRow('総選択数', '$totalSelections回'),
+              _buildStatRow('1人あたり平均', '${(totalSelections / totalVisitors).toStringAsFixed(1)}個'),
+              _buildStatRow('分野数', '${interestData.length}種類'),
+            ] else
+              const Text(
+                '興味分野データがありません',
+                style: TextStyle(color: Colors.grey),
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildBehaviorDataTab(bool isWideScreen) {
+    // 統計データの計算
+    int totalVisits = 0;
+    int totalTimeMinutes = 0;
+    int visitorsWithTime = 0;
+    
+    for (final visitor in _visitorData) {
+      totalVisits += (visitor['visitCount'] as int? ?? 0);
+      final time = visitor['totalTime'] as int? ?? 0;
+      totalTimeMinutes += time;
+      if (time > 0) visitorsWithTime++;
+    }
+    
+    final avgTime = visitorsWithTime > 0 ? totalTimeMinutes / visitorsWithTime : 0.0;
+    final totalVisitors = _visitorData.length;
+
+    return SingleChildScrollView(
+      padding: const EdgeInsets.all(16.0),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          // ヘッダーカード
+          Card(
+            color: Colors.blue.shade50,
+            elevation: 2,
+            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+            child: Padding(
+              padding: const EdgeInsets.all(24.0),
+              child: Row(
+                children: [
+                  Container(
+                    width: 60,
+                    height: 60,
+                    decoration: BoxDecoration(
+                      color: Colors.blue,
+                      borderRadius: BorderRadius.circular(12),
                     ),
+                    child: const Icon(
+                      Icons.timeline,
+                      color: Colors.white,
+                      size: 30,
+                    ),
+                  ),
+                  const SizedBox(width: 20),
+                  Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        totalVisitors.toString(),
+                        style: const TextStyle(
+                          fontSize: 36,
+                          fontWeight: FontWeight.bold,
+                          color: Colors.blue,
+                        ),
+                      ),
+                      const Text(
+                        '来場者の行動データ分析',
+                        style: TextStyle(
+                          fontSize: 16,
+                          color: Colors.grey,
+                        ),
+                      ),
+                    ],
+                  ),
                 ],
               ),
             ),
+          ),
+          
+          const SizedBox(height: 16),
+          
+          // 3つの主要指標
+          Row(
+            children: [
+              Expanded(
+                child: _buildStatCard(
+                  icon: Icons.people_outline,
+                  iconColor: Colors.blue,
+                  value: totalVisitors.toString(),
+                  label: '総訪問者数',
+                ),
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: _buildStatCard(
+                  icon: Icons.touch_app_outlined,
+                  iconColor: Colors.green,
+                  value: totalVisits.toString(),
+                  label: '総訪問回数',
+                ),
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: _buildStatCard(
+                  icon: Icons.timer_outlined,
+                  iconColor: Colors.orange,
+                  value: '${avgTime.toStringAsFixed(1)}分',
+                  label: '平均滞在時間',
+                ),
+              ),
+            ],
           ),
           
           const SizedBox(height: 24),
           
-          // サマリー統計
-          Card(
-            child: Padding(
-              padding: const EdgeInsets.all(16.0),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  const Text(
-                    'サマリー統計',
-                    style: TextStyle(
-                      fontSize: 20,
-                      fontWeight: FontWeight.bold,
-                    ),
-                  ),
-                  const SizedBox(height: 16),
-                  if (totalVisitors > 0 && interestData.isNotEmpty) ...[
-                    _buildStatRow('最多興味分野', _getMostCommon(interestData)),
-                    _buildStatRow('総来場者数', '$totalVisitors人'),
-                    _buildStatRow('総選択数', '$totalSelections回'),
-                    _buildStatRow('1人あたり平均', '${(totalSelections / totalVisitors).toStringAsFixed(1)}個'),
-                    _buildStatRow('分野数', '${interestData.length}種類'),
-                  ] else
-                    const Text(
-                      '興味分野データがありません',
-                      style: TextStyle(color: Colors.grey),
-                    ),
-                ],
+          if (isWideScreen) ...[
+            Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Expanded(child: _buildBoothTimeStats()),
+                const SizedBox(width: 24),
+                Expanded(child: _buildBoothDetailStats()),
+              ],
+            ),
+          ] else ...[
+            _buildBoothTimeStats(),
+            const SizedBox(height: 24),
+            _buildBoothDetailStats(),
+          ],
+          
+          const SizedBox(height: 100),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildBoothTimeStats() {
+    return Card(
+      elevation: 2,
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+      child: Padding(
+        padding: const EdgeInsets.all(16.0),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Text(
+              'ブース別滞在時間統計',
+              style: TextStyle(
+                fontSize: 18,
+                fontWeight: FontWeight.bold,
               ),
             ),
-          ),
-          
-          const SizedBox(height: 100), // 下部の余白
-        ],
+            const SizedBox(height: 24),
+            Container(
+              height: 150,
+              alignment: Alignment.center,
+              child: const Text(
+                '行動データがありません',
+                style: TextStyle(color: Colors.grey),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildBoothDetailStats() {
+    return Card(
+      elevation: 2,
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+      child: Padding(
+        padding: const EdgeInsets.all(16.0),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Text(
+              'ブース別詳細統計',
+              style: TextStyle(
+                fontSize: 18,
+                fontWeight: FontWeight.bold,
+              ),
+            ),
+            const SizedBox(height: 24),
+            Container(
+              height: 150, // 高さを揃える
+              alignment: Alignment.center,
+              child: const Text(
+                '統計データがありません',
+                style: TextStyle(color: Colors.grey),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildStatCard({
+    required IconData icon,
+    required Color iconColor,
+    required String value,
+    required String label,
+  }) {
+    return Card(
+      elevation: 2,
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(vertical: 16.0, horizontal: 8.0),
+        child: Column(
+          children: [
+            Icon(icon, color: iconColor, size: 32),
+            const SizedBox(height: 8),
+            Text(
+              value,
+              style: TextStyle(
+                fontSize: 20,
+                fontWeight: FontWeight.bold,
+                color: iconColor,
+              ),
+            ),
+            const SizedBox(height: 4),
+            Text(
+              label,
+              style: const TextStyle(
+                fontSize: 12,
+                color: Colors.grey,
+              ),
+              textAlign: TextAlign.center,
+            ),
+          ],
+        ),
       ),
     );
   }
@@ -1407,16 +1767,6 @@ class _OrganizerScreenState extends State<OrganizerScreen> with TickerProviderSt
     return const Center(
       child: Text(
         'Performance Tab\n(準備中)',
-        textAlign: TextAlign.center,
-        style: TextStyle(fontSize: 18, color: Colors.grey),
-      ),
-    );
-  }
-
-  Widget _buildPopularityTab() {
-    return const Center(
-      child: Text(
-        'Popularity Tab\n(準備中)',
         textAlign: TextAlign.center,
         style: TextStyle(fontSize: 18, color: Colors.grey),
       ),
