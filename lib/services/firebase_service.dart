@@ -9,8 +9,8 @@ class FirebaseService {
   
   // ビーコンの物理名からブースIDへのマッピング
   static const Map<String, String> beaconNameMapping = {
-    'FSC-BP104D': 'FSC-BP104D',  // 1台目: A09
-    'FSC-BP103B': 'Booth-A15',   // 2台目: A15（右下）
+    'FSC-BP104D': 'FSC-BP104D',  // 1台目: A08
+    'FSC-BP103B': 'FSC-BP103B',   // 2台目: A09
   };
   
   /// ビーコンの物理名をブースIDに変換
@@ -1383,9 +1383,185 @@ class FirebaseService {
     }
   }
 
-  // ========================
-  // マップレイアウト管理
-  // ========================
+  /// ブース別滞在時間を集計（実データ版）
+  Future<Map<String, double>> getBoothStayTimeStats() async {
+    try {
+      print('=== ブース別滞在時間の集計開始 ===');
+      final visitors = await getAllVisitors();
+      final boothStayTimes = <String, List<int>>{}; // ブースID -> 滞在時間リスト（分）
+
+      // ビーコンIDからブース名のマッピングを取得
+      final booths = await getAllBooths();
+      final boothNameMap = <String, String>{};
+      for (final booth in booths) {
+        if (booth['id'] != null) {
+          boothNameMap[booth['id']] = booth['displayName'] ?? booth['name'] ?? booth['id'];
+        }
+      }
+
+      // 各来場者のデータから滞在時間を集計
+      for (final visitor in visitors) {
+        // visitCountが2以上、またはtotalTimeが1分以上のデータを使用
+        if ((visitor['visitCount'] as int? ?? 0) < 2 && (visitor['totalTime'] as int? ?? 0) < 1) {
+          continue;
+        }
+
+        // ここでは簡易的に、totalTimeを訪問したブース数で割って配分する
+        // 本来は時系列ログから詳細に計算すべきだが、現状のデータ構造に合わせて簡易実装
+        final totalTime = visitor['totalTime'] as int? ?? 0;
+        final visitedBooths = visitor['boothVisits'] as List<dynamic>? ?? [];
+        
+        if (totalTime > 0 && visitedBooths.isNotEmpty) {
+          final timePerBooth = totalTime / visitedBooths.length;
+          
+          for (final boothId in visitedBooths) {
+            final boothName = boothNameMap[boothId] ?? boothId;
+            if (!boothStayTimes.containsKey(boothName)) {
+              boothStayTimes[boothName] = [];
+            }
+            // 分単位で記録（切り上げ）
+            boothStayTimes[boothName]!.add(timePerBooth.ceil());
+          }
+        }
+      }
+
+      // 平均値を計算
+      final result = <String, double>{};
+      boothStayTimes.forEach((boothName, times) {
+        if (times.isNotEmpty) {
+          final sum = times.fold(0, (prev, curr) => prev + curr);
+          result[boothName] = sum / times.length;
+        }
+      });
+
+      // 降順にソートして上位5件を返す
+      final sortedEntries = result.entries.toList()
+        ..sort((a, b) => b.value.compareTo(a.value));
+      
+      final top5 = Map.fromEntries(sortedEntries.take(5));
+      print('=== ブース別滞在時間の集計完了: $top5 ===');
+      return top5;
+    } catch (e) {
+      print('滞在時間の集計中にエラーが発生しました: $e');
+      return {};
+    }
+  }
+
+  /// よくある移動パターンを集計（実データ版）
+  Future<List<Map<String, dynamic>>> getMovementPatterns() async {
+    try {
+      print('=== 移動パターンの集計開始 ===');
+      
+      // 見込み客リストの抽出ロジックを流用して、詳細な訪問履歴を取得
+      // getAllVisitorsだと時系列ログが失われている可能性があるため、getProspectListのロジックの一部を再利用
+      
+      final today = DateTime.now();
+      final dateString = DateFormat('yyyy-MM-dd').format(today);
+      
+      // 今日の全ビーコンデータを取得
+      final allDevices = await _firestore
+          .collection('beacon_counts')
+          .doc(dateString)
+          .collection('devices')
+          .get();
+      
+      // ユーザーごとの時系列ログを構築
+      final userLogs = <String, List<Map<String, dynamic>>>{}; // userId -> [{boothId, timestamp}]
+      
+      // ビーコンIDからブース名のマッピングを取得
+      final booths = await getAllBooths();
+      final boothNameMap = <String, String>{};
+      for (final booth in booths) {
+        if (booth['id'] != null) {
+          boothNameMap[booth['id']] = booth['displayName'] ?? booth['name'] ?? booth['id'];
+        }
+      }
+
+      for (final device in allDevices.docs) {
+        final deviceData = device.data();
+        final visitors = deviceData['visitors'] as List<dynamic>?;
+        final boothId = device.id;
+        
+        if (visitors == null) continue;
+        
+        for (final v in visitors) {
+          if (v is Map<String, dynamic>) {
+            final userId = v['userId'] as String?;
+            if (userId == null) continue;
+            
+            // timestampの型変換
+            DateTime? ts;
+            if (v['timestamp'] is Timestamp) {
+              ts = (v['timestamp'] as Timestamp).toDate();
+            } else if (v['timestamp'] is String) {
+              ts = DateTime.tryParse(v['timestamp']);
+            }
+            
+            if (ts == null) continue;
+            
+            if (!userLogs.containsKey(userId)) {
+              userLogs[userId] = [];
+            }
+            
+            userLogs[userId]!.add({
+              'boothId': boothId,
+              'timestamp': ts,
+            });
+          }
+        }
+      }
+      
+      // パターン集計
+      final patternCounts = <String, int>{};
+      
+      for (final userId in userLogs.keys) {
+        final logs = userLogs[userId]!;
+        // 時系列でソート
+        logs.sort((a, b) => (a['timestamp'] as DateTime).compareTo(b['timestamp'] as DateTime));
+        
+        // 重複を除去しつつ遷移を抽出（A -> A -> B は A -> B とする）
+        String? lastBoothId;
+        for (int i = 0; i < logs.length; i++) {
+          final currentBoothId = logs[i]['boothId'];
+          
+          if (lastBoothId != null && lastBoothId != currentBoothId) {
+            // 遷移発生
+            final fromName = boothNameMap[lastBoothId] ?? lastBoothId;
+            final toName = boothNameMap[currentBoothId] ?? currentBoothId;
+            final patternKey = '$fromName -> $toName';
+            
+            patternCounts[patternKey] = (patternCounts[patternKey] ?? 0) + 1;
+          }
+          
+          lastBoothId = currentBoothId;
+        }
+      }
+      
+      // 集計結果を整形
+      final result = <Map<String, dynamic>>[];
+      patternCounts.forEach((key, count) {
+        final parts = key.split(' -> ');
+        if (parts.length == 2) {
+          result.add({
+            'from': parts[0],
+            'to': parts[1],
+            'count': count,
+          });
+        }
+      });
+      
+      // カウント順にソートして上位5件を返す
+      result.sort((a, b) => (b['count'] as int).compareTo(a['count'] as int));
+      
+      final top5 = result.take(5).toList();
+      print('=== 移動パターンの集計完了: $top5 ===');
+      return top5;
+      
+    } catch (e) {
+      print('移動パターンの集計中にエラーが発生しました: $e');
+      return [];
+    }
+  }
 
   /// 現在アクティブな展示会レイアウトを取得
   Future<Map<String, dynamic>?> getActiveEventLayout() async {
@@ -1839,6 +2015,400 @@ class FirebaseService {
     } catch (e) {
       print('カスタムブースサイズの設定中にエラーが発生しました: $e');
       rethrow;
+    }
+  }
+
+  // ========================
+  // 展示会場レイアウト初期化
+  // ========================
+
+  /// 展示会場レイアウトの初期化（2025年発表会）
+  Future<void> initializeExhibitionLayout() async {
+    try {
+      print('=== 展示会場レイアウトの初期化開始 ===');
+
+      // ステップ0: 既存のアクティブなレイアウトを無効化
+      final existingLayouts = await _firestore
+          .collection('event_layouts')
+          .where('active', isEqualTo: true)
+          .get();
+      
+      final deactivateBatch = _firestore.batch();
+      for (final doc in existingLayouts.docs) {
+        deactivateBatch.update(doc.reference, {'active': false});
+      }
+      await deactivateBatch.commit();
+      print('既存のアクティブレイアウトを無効化: ${existingLayouts.docs.length}件');
+
+      // ステップ1: イベントレイアウトのサイズを更新（縦長）
+      final eventRef = _firestore.collection('event_layouts').doc('event_2025_exhibition');
+      await eventRef.set({
+        'eventName': '2025年 プロジェクト演習発表会',
+        'eventDate': '2025-12-06',
+        'mapWidth': 450, // 右側の机が収まるように拡大
+        'mapHeight': 700,
+        'backgroundColor': '#FAFAFA',
+        'gridSize': 10,
+        'active': true,
+        'createdAt': FieldValue.serverTimestamp(),
+      });
+      print('イベントレイアウトを作成: 450x700（縦長）');
+
+      // ステップ2: 既存のマップ要素をすべて削除
+      final existingElements = await _firestore.collection('map_elements').get();
+      final deleteBatch = _firestore.batch();
+      for (final doc in existingElements.docs) {
+        deleteBatch.delete(doc.reference);
+      }
+      await deleteBatch.commit();
+      print('既存のマップ要素を削除: ${existingElements.docs.length}件');
+
+      // ステップ3: 新しい展示会場レイアウトのマップ要素を作成
+      final exhibitionElements = <Map<String, dynamic>>[
+        // 背景
+        {
+          'eventId': 'event_2025_exhibition',
+          'type': 'background',
+          'shape': 'rect',
+          'x': 0,
+          'y': 0,
+          'width': 450,
+          'height': 700,
+          'color': '#FAFAFA',
+          'label': '背景',
+          'zIndex': 0,
+        },
+
+        // 会場の外枠
+        {
+          'eventId': 'event_2025_exhibition',
+          'type': 'wall',
+          'shape': 'rect',
+          'x': 10,
+          'y': 10,
+          'width': 430,
+          'height': 680,
+          'color': '#9E9E9E',
+          'strokeWidth': 2,
+          'filled': false,
+          'label': '会場外枠',
+          'zIndex': 1,
+        },
+
+        // === 机（5つ）===
+        // A15: 左端の細長い縦長の机（他の机の2倍の長さ、幅は1/2）
+        {
+          'eventId': 'event_2025_exhibition',
+          'type': 'wall',
+          'shape': 'rect',
+          'x': 30,
+          'y': 100,
+          'width': 40,
+          'height': 500,
+          'color': '#B0BEC5',
+          'label': '机A15',
+          'zIndex': 3,
+        },
+
+        // A08: 中央左上の机
+        {
+          'eventId': 'event_2025_exhibition',
+          'type': 'wall',
+          'shape': 'rect',
+          'x': 130,
+          'y': 60,
+          'width': 80,
+          'height': 180,
+          'color': '#B0BEC5',
+          'label': '机A08',
+          'zIndex': 3,
+        },
+
+        // A09: 中央左下の机
+        {
+          'eventId': 'event_2025_exhibition',
+          'type': 'wall',
+          'shape': 'rect',
+          'x': 130,
+          'y': 300,
+          'width': 80,
+          'height': 180,
+          'color': '#B0BEC5',
+          'label': '机A09',
+          'zIndex': 3,
+        },
+
+        // A14: 右上の机
+        {
+          'eventId': 'event_2025_exhibition',
+          'type': 'wall',
+          'shape': 'rect',
+          'x': 280,
+          'y': 60,
+          'width': 80,
+          'height': 180,
+          'color': '#B0BEC5',
+          'label': '机A14',
+          'zIndex': 3,
+        },
+
+        // A13: 右下の机
+        {
+          'eventId': 'event_2025_exhibition',
+          'type': 'wall',
+          'shape': 'rect',
+          'x': 280,
+          'y': 300,
+          'width': 80,
+          'height': 180,
+          'color': '#B0BEC5',
+          'label': '机A13',
+          'zIndex': 3,
+        },
+
+        // === 通路（縦）===
+        // 左の縦通路（A15とA08/A09の間）
+        {
+          'eventId': 'event_2025_exhibition',
+          'type': 'corridor',
+          'shape': 'rect',
+          'x': 70,
+          'y': 50,
+          'width': 60,
+          'height': 600,
+          'color': '#EEEEEE',
+          'label': '左縦通路',
+          'zIndex': 1,
+        },
+
+        // 中央の縦通路（A08/A09とA14/A13の間）
+        {
+          'eventId': 'event_2025_exhibition',
+          'type': 'corridor',
+          'shape': 'rect',
+          'x': 210,
+          'y': 50,
+          'width': 70,
+          'height': 600,
+          'color': '#EEEEEE',
+          'label': '中央縦通路',
+          'zIndex': 1,
+        },
+
+        // === 通路（横）===
+        // 横通路1（A08とA09の間）
+        {
+          'eventId': 'event_2025_exhibition',
+          'type': 'corridor',
+          'shape': 'rect',
+          'x': 130,
+          'y': 240,
+          'width': 230,
+          'height': 60,
+          'color': '#EEEEEE',
+          'label': '横通路1',
+          'zIndex': 1,
+        },
+      ];
+
+      final elementBatch = _firestore.batch();
+      int elementIndex = 0;
+      for (final element in exhibitionElements) {
+        final elementRef = _firestore.collection('map_elements').doc('exhibition_element_${elementIndex++}');
+        elementBatch.set(elementRef, element);
+      }
+      await elementBatch.commit();
+      print('展示会場レイアウトのマップ要素を作成: ${exhibitionElements.length}件');
+
+      print('=== 展示会場レイアウトの初期化完了 ===');
+    } catch (e) {
+      print('展示会場レイアウトの初期化中にエラーが発生しました: $e');
+      throw Exception('展示会場レイアウトの初期化に失敗しました: $e');
+    }
+  }
+
+  /// 展示会場の全ブース座標を設定
+  Future<void> setupExhibitionBooths() async {
+    try {
+      print('=== 展示会場ブース座標の設定開始 ===');
+
+      // ステップ1: 既存のブースをすべて削除
+      final existingBooths = await _firestore.collection('booths').get();
+      final batch = _firestore.batch();
+      for (final doc in existingBooths.docs) {
+        batch.delete(doc.reference);
+      }
+      await batch.commit();
+      print('既存のブースを削除: ${existingBooths.docs.length}件');
+
+      // 展示会場レイアウトに基づくブース座標マッピング
+      // ブースは机と机の間の通路に配置（PDFの画像に基づく）
+      final boothPositions = {
+        // 左の通路（A15とA08/A09の間）- 上から下へ
+        'Booth-A15': {'x': 90, 'y': 130, 'name': 'ブースA15', 'width': 25, 'height': 25},
+        'Booth-A14': {'x': 90, 'y': 200, 'name': 'ブースA14', 'width': 25, 'height': 25},
+        'Booth-A13': {'x': 90, 'y': 400, 'name': 'ブースA13', 'width': 25, 'height': 25},
+        'Booth-A12': {'x': 90, 'y': 470, 'name': 'ブースA12', 'width': 25, 'height': 25},
+
+        // 中央上の通路（A08とA14の間）- 上から下へ
+        'FSC-BP104D': {'x': 240, 'y': 130, 'name': 'ブースA08', 'width': 25, 'height': 25},  // A08（ビーコン1）
+        'FSC-BP103B': {'x': 240, 'y': 190, 'name': 'ブースA09', 'width': 25, 'height': 25},  // A09（ビーコン2）
+
+        // 中央下の通路（A09とA13の間）- 上から下へ
+        'Booth-A10': {'x': 240, 'y': 400, 'name': 'ブースA10', 'width': 25, 'height': 25},
+        'Booth-A11': {'x': 240, 'y': 460, 'name': 'ブースA11', 'width': 25, 'height': 25},
+      };
+
+      final addBatch = _firestore.batch();
+      for (final entry in boothPositions.entries) {
+        final boothId = entry.key;
+        final position = entry.value;
+
+        final docRef = _firestore.collection('booths').doc(boothId);
+        addBatch.set(docRef, {
+          'id': boothId,
+          'name': position['name'],
+          'displayName': position['name'],
+          'x': position['x'],
+          'y': position['y'],
+          'width': position['width'],
+          'height': position['height'],
+          'shape': 'circle', // ブースは円形
+          'type': 'booth',
+          'company': '出展企業',
+          'description': '詳細情報は準備中です。',
+          'products': ['準備中'],
+          'contactEmail': 'info@example.com',
+          'website': 'https://example.com',
+          'features': ['準備中'],
+        });
+      }
+      await addBatch.commit();
+      print('展示会場ブース座標の設定完了: ${boothPositions.length}件作成 ===');
+    } catch (e) {
+      print('展示会場ブース座標の設定中にエラーが発生しました: $e');
+      throw Exception('展示会場ブース座標の設定に失敗しました: $e');
+    }
+  }
+
+  /// 展示会場に追加の通路を追加（既存のデータを保持）
+  Future<void> addExhibitionCorridors() async {
+    try {
+      print('=== 展示会場に通路を追加開始 ===');
+
+      // 追加する通路のリスト
+      final additionalCorridors = <Map<String, dynamic>>[
+        // 上部の通路
+        {
+          'eventId': 'event_2025_exhibition',
+          'type': 'corridor',
+          'shape': 'rect',
+          'x': 70,
+          'y': 30,
+          'width': 340,
+          'height': 30,
+          'color': '#EEEEEE',
+          'label': '上部通路',
+          'zIndex': 1,
+        },
+
+        // 下部の通路
+        {
+          'eventId': 'event_2025_exhibition',
+          'type': 'corridor',
+          'shape': 'rect',
+          'x': 70,
+          'y': 630,
+          'width': 340,
+          'height': 30,
+          'color': '#EEEEEE',
+          'label': '下部通路',
+          'zIndex': 1,
+        },
+
+        // 右側の通路
+        {
+          'eventId': 'event_2025_exhibition',
+          'type': 'corridor',
+          'shape': 'rect',
+          'x': 410,
+          'y': 50,
+          'width': 30,
+          'height': 600,
+          'color': '#EEEEEE',
+          'label': '右側通路',
+          'zIndex': 1,
+        },
+      ];
+
+      final batch = _firestore.batch();
+      int corridorIndex = 100; // 既存の要素と重複しないようにインデックスを100から開始
+      
+      for (final corridor in additionalCorridors) {
+        final corridorRef = _firestore.collection('map_elements').doc('exhibition_corridor_${corridorIndex++}');
+        batch.set(corridorRef, corridor);
+      }
+      
+      await batch.commit();
+      print('展示会場に通路を追加完了: ${additionalCorridors.length}件追加');
+    } catch (e) {
+      print('展示会場に通路を追加中にエラーが発生しました: $e');
+      throw Exception('展示会場に通路を追加に失敗しました: $e');
+    }
+  }
+
+  /// 展示会場のマップサイズを更新（既存のマップ要素とブースを保持）
+  Future<void> updateExhibitionMapSize({required int width, required int height}) async {
+    try {
+      print('=== 展示会場のマップサイズを更新開始 ===');
+
+      // イベントレイアウトのサイズを更新
+      final eventRef = _firestore.collection('event_layouts').doc('event_2025_exhibition');
+      await eventRef.update({
+        'mapWidth': width,
+        'mapHeight': height,
+      });
+      print('イベントレイアウトのサイズを更新: ${width}x${height}');
+
+      // 背景と外枠のサイズも更新
+      final batch = _firestore.batch();
+      
+      // 背景のサイズを更新
+      final backgroundQuery = await _firestore
+          .collection('map_elements')
+          .where('eventId', isEqualTo: 'event_2025_exhibition')
+          .where('type', isEqualTo: 'background')
+          .get();
+      
+      for (final doc in backgroundQuery.docs) {
+        batch.update(doc.reference, {
+          'width': width,
+          'height': height,
+        });
+      }
+      print('背景のサイズを更新: ${backgroundQuery.docs.length}件');
+
+      // 外枠のサイズを更新
+      final wallQuery = await _firestore
+          .collection('map_elements')
+          .where('eventId', isEqualTo: 'event_2025_exhibition')
+          .where('label', isEqualTo: '会場外枠')
+          .get();
+      
+      for (final doc in wallQuery.docs) {
+        batch.update(doc.reference, {
+          'width': width - 20,  // 左右に10pxずつの余白
+          'height': height - 20,
+        });
+      }
+      print('外枠のサイズを更新: ${wallQuery.docs.length}件');
+
+      await batch.commit();
+      
+      print('展示会場のマップサイズを更新完了: ${width}x${height}');
+    } catch (e) {
+      print('展示会場のマップサイズを更新中にエラーが発生しました: $e');
+      throw Exception('展示会場のマップサイズを更新に失敗しました: $e');
     }
   }
 
