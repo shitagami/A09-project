@@ -9,17 +9,32 @@ class ExhibitorScreen extends StatefulWidget {
   State<ExhibitorScreen> createState() => _ExhibitorScreenState();
 }
 
-class _ExhibitorScreenState extends State<ExhibitorScreen> {
+class _ExhibitorScreenState extends State<ExhibitorScreen>
+    with TickerProviderStateMixin {
   final AuthService _authService = AuthService();
   final FirebaseService _firebaseService = FirebaseService();
   Map<String, dynamic> _todayStats = {};
   bool _isLoading = false;
   String _userName = '';
+  late TabController _tabController;
+  int _selectedTabIndex = 0;
 
   @override
   void initState() {
     super.initState();
+    _tabController = TabController(length: 2, vsync: this);
+    _tabController.addListener(() {
+      setState(() {
+        _selectedTabIndex = _tabController.index;
+      });
+    });
     _loadData();
+  }
+
+  @override
+  void dispose() {
+    _tabController.dispose();
+    super.dispose();
   }
 
   Future<void> _loadData() async {
@@ -49,8 +64,18 @@ class _ExhibitorScreenState extends State<ExhibitorScreen> {
     Navigator.of(context).pushReplacementNamed('/login');
   }
 
+  int _getTotalCount() {
+    int total = 0;
+    for (final data in _todayStats.values) {
+      total += (data['count'] as int? ?? 0);
+    }
+    return total;
+  }
+
   @override
   Widget build(BuildContext context) {
+    final totalCount = _getTotalCount();
+
     return Scaffold(
       appBar: AppBar(
         title: const Text('出展者管理画面'),
@@ -66,37 +91,156 @@ class _ExhibitorScreenState extends State<ExhibitorScreen> {
             onPressed: _logout,
           ),
         ],
+        bottom: TabBar(
+          controller: _tabController,
+          indicatorColor: Colors.white,
+          labelColor: Colors.white,
+          unselectedLabelColor: Colors.white70,
+          tabs: const [
+            Tab(text: 'ダッシュボード'),
+            Tab(text: '来場者管理'),
+          ],
+        ),
       ),
       body: _isLoading
           ? const Center(child: CircularProgressIndicator())
-          : Padding(
-              padding: const EdgeInsets.all(16.0),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  // ユーザー情報
-                  Card(
+          : LayoutBuilder(
+              builder: (context, constraints) {
+                final isWideScreen = constraints.maxWidth > 900;
+                if (isWideScreen) {
+                  return Row(
+                    children: [
+                      Container(
+                        width: 220,
+                        color: Colors.blue.shade50,
+                        child: ListView(
+                          children: [
+                            _buildTabButton(0, 'ダッシュボード', Icons.dashboard),
+                            _buildTabButton(1, '来場者管理', Icons.people),
+                          ],
+                        ),
+                      ),
+                      Expanded(
+                        child: IndexedStack(
+                          index: _selectedTabIndex,
+                          children: [
+                            _buildDashboardTab(totalCount, isWideScreen),
+                            _buildVisitorManageTab(),
+                          ],
+                        ),
+                      ),
+                    ],
+                  );
+                }
+                return TabBarView(
+                  controller: _tabController,
+                  children: [
+                    _buildDashboardTab(totalCount, isWideScreen),
+                    _buildVisitorManageTab(),
+                  ],
+                );
+              },
+            ),
+    );
+  }
+
+  Widget _buildTabButton(int index, String label, IconData icon) {
+    final isSelected = _selectedTabIndex == index;
+    return InkWell(
+      onTap: () {
+        setState(() {
+          _selectedTabIndex = index;
+        });
+        _tabController.animateTo(index);
+      },
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 16),
+        color: isSelected ? Colors.blue.shade100 : Colors.transparent,
+        child: Row(
+          children: [
+            Icon(icon, color: isSelected ? Colors.blue : Colors.grey),
+            const SizedBox(width: 12),
+            Expanded(
+              child: Text(
+                label,
+                style: TextStyle(
+                  fontWeight: isSelected ? FontWeight.bold : FontWeight.normal,
+                  color: isSelected ? Colors.blue : Colors.black87,
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildDashboardTab(int totalCount, bool isWideScreen) {
+    return SingleChildScrollView(
+      padding: const EdgeInsets.all(16.0),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Expanded(
+                child: Card(
+                  elevation: 2,
+                  child: Padding(
+                    padding: const EdgeInsets.all(16.0),
+                    child: Row(
+                      children: [
+                        const Icon(Icons.person, size: 48, color: Colors.blue),
+                        const SizedBox(width: 16),
+                        Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              _userName,
+                              style: const TextStyle(
+                                fontSize: 22,
+                                fontWeight: FontWeight.bold,
+                              ),
+                            ),
+                            const Text(
+                              '出展者アカウント',
+                              style: TextStyle(
+                                fontSize: 16,
+                                color: Colors.grey,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              ),
+              if (isWideScreen) ...[
+                const SizedBox(width: 16),
+                Expanded(
+                  child: Card(
+                    color: Colors.blue.shade50,
+                    elevation: 2,
                     child: Padding(
                       padding: const EdgeInsets.all(16.0),
                       child: Row(
                         children: [
-                          const Icon(Icons.person, size: 40, color: Colors.blue),
+                          const Icon(Icons.analytics, size: 48, color: Colors.blue),
                           const SizedBox(width: 16),
                           Column(
                             crossAxisAlignment: CrossAxisAlignment.start,
                             children: [
-                              Text(
-                                _userName,
-                                style: const TextStyle(
-                                  fontSize: 20,
-                                  fontWeight: FontWeight.bold,
-                                ),
-                              ),
                               const Text(
-                                '出展者',
-                                style: TextStyle(
-                                  fontSize: 16,
-                                  color: Colors.grey,
+                                '今日の総受信数',
+                                style: TextStyle(fontSize: 16, color: Colors.grey),
+                              ),
+                              Text(
+                                '$totalCount回',
+                                style: const TextStyle(
+                                  fontSize: 30,
+                                  fontWeight: FontWeight.bold,
+                                  color: Colors.blue,
                                 ),
                               ),
                             ],
@@ -105,140 +249,234 @@ class _ExhibitorScreenState extends State<ExhibitorScreen> {
                       ),
                     ),
                   ),
-                  
-                  const SizedBox(height: 24),
-                  
-                  // 管理機能
-                  const Text(
-                    '管理機能',
-                    style: TextStyle(
-                      fontSize: 20,
-                      fontWeight: FontWeight.bold,
-                    ),
-                  ),
-                  const SizedBox(height: 16),
-                  
-                  Row(
-                    children: [
-                      Expanded(
-                        child: Card(
-                          child: InkWell(
-                            onTap: () {
-                              Navigator.of(context).pushNamed('/visitor_management');
-                            },
-                            child: Padding(
-                              padding: const EdgeInsets.all(16.0),
-                              child: Column(
-                                children: [
-                                  const Icon(Icons.people, size: 40, color: Colors.blue),
-                                  const SizedBox(height: 8),
-                                  const Text(
-                                    '来場者管理',
-                                    style: TextStyle(fontWeight: FontWeight.bold),
-                                  ),
-                                  const SizedBox(height: 4),
-                                  const Text(
-                                    '見込み客リスト',
-                                    style: TextStyle(fontSize: 12, color: Colors.grey),
-                                  ),
-                                ],
+                ),
+              ],
+            ],
+          ),
+          const SizedBox(height: 24),
+          const Text(
+            '管理機能',
+            style: TextStyle(
+              fontSize: 20,
+              fontWeight: FontWeight.bold,
+            ),
+          ),
+          const SizedBox(height: 16),
+          GridView.count(
+            shrinkWrap: true,
+            physics: const NeverScrollableScrollPhysics(),
+            crossAxisCount: isWideScreen ? 3 : 2,
+            crossAxisSpacing: 12,
+            mainAxisSpacing: 12,
+            childAspectRatio: isWideScreen ? 1.6 : 1.2,
+            children: [
+              _buildActionCard(
+                icon: Icons.people,
+                iconColor: Colors.blue,
+                title: '来場者管理',
+                subtitle: '見込み客リストを確認',
+                onTap: () => Navigator.of(context).pushNamed('/visitor_management'),
+              ),
+              _buildActionCard(
+                icon: Icons.store,
+                iconColor: Colors.orange,
+                title: 'ブース詳細',
+                subtitle: '準備中',
+                onTap: () {
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    const SnackBar(content: Text('ブース詳細機能は準備中です')),
+                  );
+                },
+              ),
+              _buildActionCard(
+                icon: Icons.refresh,
+                iconColor: Colors.green,
+                title: '最新データ取得',
+                subtitle: '手動で更新する',
+                onTap: _loadData,
+              ),
+            ],
+          ),
+          const SizedBox(height: 24),
+          const Text(
+            '今日のビーコン受信統計',
+            style: TextStyle(
+              fontSize: 20,
+              fontWeight: FontWeight.bold,
+            ),
+          ),
+          const SizedBox(height: 16),
+          if (_todayStats.isEmpty)
+            const Card(
+              child: Padding(
+                padding: EdgeInsets.all(16.0),
+                child: Text(
+                  '今日の統計データはありません',
+                  style: TextStyle(fontSize: 16, color: Colors.grey),
+                ),
+              ),
+            )
+          else
+            GridView.builder(
+              shrinkWrap: true,
+              physics: const NeverScrollableScrollPhysics(),
+              gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
+                crossAxisCount: isWideScreen ? 3 : 1,
+                crossAxisSpacing: 12,
+                mainAxisSpacing: 12,
+                childAspectRatio: isWideScreen ? 2.5 : 3.2,
+              ),
+              itemCount: _todayStats.length,
+              itemBuilder: (context, index) {
+                final deviceName = _todayStats.keys.elementAt(index);
+                final data = _todayStats[deviceName] as Map<String, dynamic>;
+                final count = data['count'] ?? 0;
+                final percentage = totalCount > 0
+                    ? ((count / totalCount) * 100).toStringAsFixed(1)
+                    : '0.0';
+
+                return Card(
+                  elevation: 2,
+                  child: Padding(
+                    padding: const EdgeInsets.all(16.0),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                      children: [
+                        Row(
+                          children: [
+                            const Icon(Icons.bluetooth, color: Colors.blue),
+                            const SizedBox(width: 8),
+                            Expanded(
+                              child: Text(
+                                deviceName,
+                                style: const TextStyle(
+                                  fontSize: 16,
+                                  fontWeight: FontWeight.bold,
+                                ),
+                                overflow: TextOverflow.ellipsis,
                               ),
                             ),
-                          ),
+                          ],
                         ),
-                      ),
-                      const SizedBox(width: 16),
-                      Expanded(
-                        child: Card(
-                          child: InkWell(
-                            onTap: () {
-                              // ブース詳細
-                              ScaffoldMessenger.of(context).showSnackBar(
-                                const SnackBar(
-                                  content: Text('ブース詳細機能は準備中です'),
-                                ),
-                              );
-                            },
-                            child: Padding(
-                              padding: const EdgeInsets.all(16.0),
-                              child: Column(
-                                children: [
-                                  const Icon(Icons.store, size: 40, color: Colors.orange),
-                                  const SizedBox(height: 8),
-                                  const Text(
-                                    'ブース詳細',
-                                    style: TextStyle(fontWeight: FontWeight.bold),
-                                  ),
-                                ],
+                        Row(
+                          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                          children: [
+                            Text(
+                              '$count回',
+                              style: const TextStyle(
+                                fontSize: 24,
+                                fontWeight: FontWeight.bold,
+                                color: Colors.blue,
                               ),
                             ),
-                          ),
-                        ),
-                      ),
-                    ],
-                  ),
-                  
-                  const SizedBox(height: 24),
-                  
-                  // 今日の統計
-                  const Text(
-                    '今日のビーコン受信統計',
-                    style: TextStyle(
-                      fontSize: 20,
-                      fontWeight: FontWeight.bold,
-                    ),
-                  ),
-                  const SizedBox(height: 16),
-                  
-                  if (_todayStats.isEmpty)
-                    const Card(
-                      child: Padding(
-                        padding: EdgeInsets.all(16.0),
-                        child: Text(
-                          '今日の統計データはありません',
-                          style: TextStyle(fontSize: 16, color: Colors.grey),
-                        ),
-                      ),
-                    )
-                  else
-                    Expanded(
-                      child: ListView.builder(
-                        itemCount: _todayStats.length,
-                        itemBuilder: (context, index) {
-                          final deviceName = _todayStats.keys.elementAt(index);
-                          final data = _todayStats[deviceName] as Map<String, dynamic>;
-                          final count = data['count'] ?? 0;
-                          
-                          return Card(
-                            child: ListTile(
-                              leading: const Icon(Icons.bluetooth, color: Colors.blue),
-                              title: Text(deviceName),
-                              subtitle: Text('受信回数: $count回'),
-                              trailing: Container(
-                                padding: const EdgeInsets.symmetric(
-                                  horizontal: 12,
-                                  vertical: 6,
-                                ),
-                                decoration: BoxDecoration(
+                            Container(
+                              padding: const EdgeInsets.symmetric(
+                                horizontal: 12,
+                                vertical: 6,
+                              ),
+                              decoration: BoxDecoration(
+                                color: Colors.blue.shade50,
+                                borderRadius: BorderRadius.circular(12),
+                              ),
+                              child: Text(
+                                '$percentage%',
+                                style: const TextStyle(
                                   color: Colors.blue,
-                                  borderRadius: BorderRadius.circular(20),
-                                ),
-                                child: Text(
-                                  count.toString(),
-                                  style: const TextStyle(
-                                    color: Colors.white,
-                                    fontWeight: FontWeight.bold,
-                                  ),
+                                  fontWeight: FontWeight.bold,
+                                  fontSize: 12,
                                 ),
                               ),
                             ),
-                          );
-                        },
-                      ),
+                          ],
+                        ),
+                      ],
                     ),
-                ],
+                  ),
+                );
+              },
+            ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildVisitorManageTab() {
+    return Center(
+      child: Padding(
+        padding: const EdgeInsets.all(24.0),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Text(
+              '来場者管理',
+              style: TextStyle(fontSize: 22, fontWeight: FontWeight.bold),
+            ),
+            const SizedBox(height: 12),
+            const Text(
+              'PCでも大きな画面で来場者リストを閲覧できます。',
+              style: TextStyle(color: Colors.grey),
+            ),
+            const SizedBox(height: 24),
+            ElevatedButton.icon(
+              onPressed: () => Navigator.of(context).pushNamed('/visitor_management'),
+              icon: const Icon(Icons.open_in_new),
+              label: const Text('来場者管理を開く'),
+              style: ElevatedButton.styleFrom(
+                backgroundColor: Colors.blue,
+                foregroundColor: Colors.white,
+                padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
               ),
             ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildActionCard({
+    required IconData icon,
+    required Color iconColor,
+    required String title,
+    required String subtitle,
+    required VoidCallback onTap,
+  }) {
+    return Card(
+      elevation: 2,
+      child: InkWell(
+        onTap: onTap,
+        child: Padding(
+          padding: const EdgeInsets.all(16.0),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              CircleAvatar(
+                backgroundColor: iconColor.withOpacity(0.1),
+                foregroundColor: iconColor,
+                child: Icon(icon),
+              ),
+              Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    title,
+                    style: const TextStyle(
+                      fontSize: 16,
+                      fontWeight: FontWeight.bold,
+                    ),
+                  ),
+                  const SizedBox(height: 4),
+                  Text(
+                    subtitle,
+                    style: const TextStyle(fontSize: 12, color: Colors.grey),
+                  ),
+                ],
+              ),
+            ],
+          ),
+        ),
+      ),
     );
   }
 }

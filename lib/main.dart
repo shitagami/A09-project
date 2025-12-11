@@ -14,56 +14,116 @@ import 'screens/web_dashboard_screen.dart';
 import 'services/notification_service.dart';
 import 'package:flutter/foundation.dart';
 
-void main() async {
+void main() {
   WidgetsFlutterBinding.ensureInitialized();
-  
-  bool firebaseInitialized = false;
-  try {
-    // Firebaseの初期化
-    final options = DefaultFirebaseOptions.currentPlatform;
-    
-    // Web用の設定が正しく設定されているか確認
-    if (kIsWeb) {
-      final webOptions = options as FirebaseOptions;
-      if (webOptions.appId.contains('YOUR-WEB-APP-ID') || 
-          webOptions.apiKey.contains('YOUR-WEB-API-KEY')) {
-        print('警告: Web用のFirebase設定が正しく設定されていません。');
-        print('FirebaseコンソールでWebアプリを追加し、flutterfire configure --platforms=web を実行してください。');
-        // 設定が不完全な場合は初期化をスキップ
-        firebaseInitialized = false;
+  runApp(const AppStarter());
+}
+
+class AppStarter extends StatefulWidget {
+  const AppStarter({super.key});
+
+  @override
+  State<AppStarter> createState() => _AppStarterState();
+}
+
+class _AppStarterState extends State<AppStarter> {
+  bool _initialized = false;
+  bool _firebaseInitialized = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _initializeApp();
+  }
+
+  Future<void> _initializeApp() async {
+    bool firebaseInitResult = false;
+    try {
+      // Firebaseの初期化
+      final options = DefaultFirebaseOptions.currentPlatform;
+      
+      // Web用の設定が正しく設定されているか確認
+      if (kIsWeb) {
+        final webOptions = options as FirebaseOptions;
+        if (webOptions.appId.contains('YOUR-WEB-APP-ID') || 
+            webOptions.apiKey.contains('YOUR-WEB-API-KEY')) {
+          print('警告: Web用のFirebase設定が正しく設定されていません。');
+          print('FirebaseコンソールでWebアプリを追加し、flutterfire configure --platforms=web を実行してください。');
+          // 設定が不完全な場合は初期化をスキップ
+          firebaseInitResult = false;
+        } else {
+          await Firebase.initializeApp(options: options);
+          firebaseInitResult = true;
+          print('Firebase初期化成功 (Web)');
+        }
       } else {
         await Firebase.initializeApp(options: options);
-        firebaseInitialized = true;
-        print('Firebase初期化成功 (Web)');
+        firebaseInitResult = true;
+        print('Firebase初期化成功');
       }
-    } else {
-      await Firebase.initializeApp(options: options);
-      firebaseInitialized = true;
-      print('Firebase初期化成功');
+    } catch (e, stackTrace) {
+      print('Firebase初期化エラー: $e');
+      print('スタックトレース: $stackTrace');
+      // Firebase初期化に失敗してもアプリは起動する
+      firebaseInitResult = false;
+      if (kIsWeb) {
+        print('注意: Web用のFirebase設定が正しく設定されていない可能性があります。');
+        print('FirebaseコンソールでWebアプリを追加し、flutterfire configure --platforms=web を実行してください。');
+      }
     }
-  } catch (e, stackTrace) {
-    print('Firebase初期化エラー: $e');
-    print('スタックトレース: $stackTrace');
-    // Firebase初期化に失敗してもアプリは起動する
-    firebaseInitialized = false;
-    if (kIsWeb) {
-      print('注意: Web用のFirebase設定が正しく設定されていない可能性があります。');
-      print('FirebaseコンソールでWebアプリを追加し、flutterfire configure --platforms=web を実行してください。');
+    
+    try {
+      // 通知サービスを初期化（Webではスキップ）
+      if (!kIsWeb) {
+        await NotificationService().initialize();
+        print('通知サービス初期化成功');
+      }
+    } catch (e) {
+      print('通知サービス初期化エラー: $e');
+      // 通知サービス初期化に失敗してもアプリは起動する
+    }
+
+    if (mounted) {
+      setState(() {
+        _firebaseInitialized = firebaseInitResult;
+        _initialized = true;
+      });
     }
   }
-  
-  try {
-    // 通知サービスを初期化（Webではスキップ）
-    if (!kIsWeb) {
-      await NotificationService().initialize();
-      print('通知サービス初期化成功');
+
+  @override
+  Widget build(BuildContext context) {
+    if (!_initialized) {
+      return MaterialApp(
+        home: Scaffold(
+          backgroundColor: Colors.white,
+          body: Center(
+            child: Column(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                const CircularProgressIndicator(),
+                const SizedBox(height: 16),
+                const Text('アプリを起動中...', style: TextStyle(fontSize: 16)),
+                const SizedBox(height: 8),
+                // 長時間ロードが終わらない場合のメッセージ
+                TextButton(
+                  onPressed: () {
+                    setState(() {
+                      _initialized = true;
+                      _firebaseInitialized = false;
+                    });
+                  },
+                  child: const Text('ロードが終わらない場合はこちらをタップ'),
+                ),
+              ],
+            ),
+          ),
+        ),
+      );
     }
-  } catch (e) {
-    print('通知サービス初期化エラー: $e');
-    // 通知サービス初期化に失敗してもアプリは起動する
+    
+    return MyApp(firebaseInitialized: _firebaseInitialized);
   }
-  
-  runApp(MyApp(firebaseInitialized: firebaseInitialized));
 }
 
 void setup() async {
@@ -86,9 +146,8 @@ class MyApp extends StatelessWidget {
         colorScheme: ColorScheme.fromSeed(seedColor: Colors.deepPurple),
         useMaterial3: true,
       ),
-      home: firebaseInitialized 
-          ? const LoginScreen() 
-          : const _FirebaseErrorScreen(), // Firebase初期化エラー時の画面
+      // デバッグ用：主催者画面を直接表示
+      home: const OrganizerScreen(),
       routes: {
         '/login': (context) => const LoginScreen(),
         '/home': (context) => const HomeScreen(),

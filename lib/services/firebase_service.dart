@@ -6,12 +6,318 @@ class FirebaseService {
   final FirebaseFirestore _firestore = FirebaseFirestore.instance;
   // ユーザーが同じビーコンに短時間でアクセスしたかどうかを記録するマップ
   final Map<String, DateTime> _lastProcessedUserBeacon = {};
+  // 最適ルート計算の際に使用する最大全探索件数
+  static const int _tspExactLimit = 8;
   
   // ビーコンの物理名からブースIDへのマッピング
   static const Map<String, String> beaconNameMapping = {
-    'FSC-BP104D': 'FSC-BP104D',  // 1台目: A08
-    'FSC-BP103B': 'FSC-BP103B',   // 2台目: A09
+    'FSC-BP104D': 'FSC-BP104D',  // 1台目: A09
+    'FSC-BP103B': 'FSC-BP103B',   // 2台目: A08
   };
+
+  /// デフォルトのRSSI閾値
+  static const Map<String, int> _defaultRssiThresholds = {
+    'FSC-BP104D': -92,
+    'FSC-BP103B': -92,
+  };
+
+  /// 全ビーコンのRSSI閾値を取得
+  Future<Map<String, int>> getAllBeaconRssiThresholds() async {
+    try {
+      // 新スキーマ: system_settings/rssi_thresholds ドキュメント
+      final doc = await _firestore.collection('system_settings').doc('rssi_thresholds').get();
+      if (doc.exists) {
+        final data = doc.data() ?? {};
+        final result = <String, int>{};
+        for (final entry in data.entries) {
+          if (entry.value is int) {
+            result[entry.key] = entry.value as int;
+          }
+        }
+        // デフォルトがあれば補完
+        _defaultRssiThresholds.forEach((k, v) {
+          result.putIfAbsent(k, () => v);
+        });
+        return result;
+      }
+
+      // 旧スキーマ: beacon_rssi_thresholds コレクション
+      final snapshot = await _firestore.collection('beacon_rssi_thresholds').get();
+      if (snapshot.docs.isNotEmpty) {
+        final result = <String, int>{};
+        for (final d in snapshot.docs) {
+          final data = d.data();
+          final threshold = data['threshold'];
+          if (threshold is int) {
+            result[d.id] = threshold;
+          }
+        }
+        _defaultRssiThresholds.forEach((k, v) {
+          result.putIfAbsent(k, () => v);
+        });
+        return result;
+      }
+
+      // どちらも無い場合はデフォルト
+      return Map<String, int>.from(_defaultRssiThresholds);
+    } catch (e) {
+      print('RSSI閾値取得中にエラー: $e');
+      return Map<String, int>.from(_defaultRssiThresholds);
+    }
+  }
+
+  /// RSSI閾値の変更を監視
+  Stream<Map<String, int>> watchBeaconRssiThresholds() {
+    return _firestore.collection('system_settings').doc('rssi_thresholds').snapshots().map((doc) {
+      final result = <String, int>{};
+      if (doc.exists) {
+        final data = doc.data() ?? {};
+        data.forEach((key, value) {
+          if (value is int) {
+            result[key] = value;
+          }
+        });
+      }
+      _defaultRssiThresholds.forEach((k, v) {
+        result.putIfAbsent(k, () => v);
+      });
+      return result;
+    });
+  }
+
+  /// ビーコンごとのRSSI閾値を設定
+  Future<void> setBeaconRssiThreshold(String beaconName, int threshold) async {
+    try {
+      // 新スキーマ: system_settings/rssi_thresholds ドキュメントにマージ
+      await _firestore
+          .collection('system_settings')
+          .doc('rssi_thresholds')
+          .set({
+            beaconName: threshold,
+            'updatedAt': FieldValue.serverTimestamp(),
+          }, SetOptions(merge: true));
+      print('RSSI閾値を保存 (system_settings): $beaconName => $threshold');
+    } catch (e) {
+      print('RSSI閾値保存中にエラー: $e');
+      rethrow;
+    }
+  }
+
+  // ------------------------------
+  // お気に入り（ブースToDoリスト）
+  // ------------------------------
+
+  /// 指定ユーザーのブースお気に入り一覧を取得
+  Future<List<String>> getBookmarkedBoothIds(String userId) async {
+    try {
+      final doc = await _firestore.collection('user_bookmarks').doc(userId).get();
+      if (!doc.exists) return [];
+      final data = doc.data() ?? {};
+      final booths = data['booths'];
+      if (booths is List) {
+        return booths.whereType<String>().toList();
+      }
+      return [];
+    } catch (e) {
+      print('お気に入り取得中にエラー: $e');
+      return [];
+    }
+  }
+
+  /// ブースをお気に入りに追加
+  Future<void> addBoothBookmark(String userId, String boothId) async {
+    try {
+      await _firestore.collection('user_bookmarks').doc(userId).set({
+        'booths': FieldValue.arrayUnion([boothId]),
+        'updatedAt': FieldValue.serverTimestamp(),
+      }, SetOptions(merge: true));
+      print('お気に入り追加: $boothId');
+    } catch (e) {
+      print('お気に入り追加中にエラー: $e');
+      rethrow;
+    }
+  }
+
+  /// ブースをお気に入りから削除
+  Future<void> removeBoothBookmark(String userId, String boothId) async {
+    try {
+      await _firestore.collection('user_bookmarks').doc(userId).set({
+        'booths': FieldValue.arrayRemove([boothId]),
+        'updatedAt': FieldValue.serverTimestamp(),
+      }, SetOptions(merge: true));
+      print('お気に入り削除: $boothId');
+    } catch (e) {
+      print('お気に入り削除中にエラー: $e');
+      rethrow;
+    }
+  }
+
+  /// トグル（追加/削除）して結果を返す
+  Future<bool> toggleBoothBookmark(String userId, String boothId) async {
+    final current = await getBookmarkedBoothIds(userId);
+    final isFavorite = current.contains(boothId);
+    if (isFavorite) {
+      await removeBoothBookmark(userId, boothId);
+      return false;
+    } else {
+      await addBoothBookmark(userId, boothId);
+      return true;
+    }
+  }
+
+  // ------------------------------
+  // 巡回ルート最適化（簡易TSP）
+  // ------------------------------
+
+  /// ブースID一覧から座標マップを生成
+  Future<Map<String, Map<String, double>>> _fetchBoothPositions(Set<String> boothIds) async {
+    final booths = await getAllBooths();
+    final pos = <String, Map<String, double>>{};
+    for (final b in booths) {
+      final id = b['id']?.toString();
+      if (id == null) continue;
+      if (!boothIds.contains(id)) continue;
+      final x = (b['x'] as num?)?.toDouble();
+      final y = (b['y'] as num?)?.toDouble();
+      if (x != null && y != null) {
+        pos[id] = {'x': x, 'y': y};
+      }
+    }
+    return pos;
+  }
+
+  double _dist(Map<String, double> a, Map<String, double> b) {
+    final dx = (a['x'] ?? 0) - (b['x'] ?? 0);
+    final dy = (a['y'] ?? 0) - (b['y'] ?? 0);
+    return math.sqrt(dx * dx + dy * dy);
+  }
+
+  double _routeLength(List<String> order, Map<String, Map<String, double>> pos, Map<String, double> start) {
+    double sum = 0;
+    Map<String, double> current = start;
+    for (final id in order) {
+      final p = pos[id];
+      if (p == null) continue;
+      sum += _dist(current, p);
+      current = p;
+    }
+    return sum;
+  }
+
+  /// 2-optで経路を局所改善
+  List<String> _twoOpt(List<String> route, Map<String, Map<String, double>> pos, Map<String, double> start) {
+    bool improved = true;
+    while (improved) {
+      improved = false;
+      for (int i = 0; i < route.length - 1; i++) {
+        for (int k = i + 1; k < route.length; k++) {
+          final newRoute = [
+            ...route.sublist(0, i),
+            ...route.sublist(i, k + 1).reversed,
+            ...route.sublist(k + 1)
+          ];
+          if (_routeLength(newRoute, pos, start) + 1e-6 < _routeLength(route, pos, start)) {
+            route = newRoute;
+            improved = true;
+          }
+        }
+      }
+    }
+    return route;
+  }
+
+  /// 近傍挿入法で初期経路を構築
+  List<String> _nearestInsertion(List<String> targets, Map<String, Map<String, double>> pos, Map<String, double> start) {
+    if (targets.isEmpty) return [];
+    final unvisited = List<String>.from(targets);
+    // startに最も近い点を初期とする
+    unvisited.sort((a, b) {
+      final da = _dist(start, pos[a]!);
+      final db = _dist(start, pos[b]!);
+      return da.compareTo(db);
+    });
+    final route = <String>[unvisited.removeAt(0)];
+    while (unvisited.isNotEmpty) {
+      // 最も近い未訪問を選ぶ
+      unvisited.sort((a, b) {
+        final da = _dist(pos[route.last]!, pos[a]!);
+        final db = _dist(pos[route.last]!, pos[b]!);
+        return da.compareTo(db);
+      });
+      final next = unvisited.removeAt(0);
+      // ベストな挿入位置を探す
+      double bestIncrease = double.infinity;
+      int bestIdx = 0;
+      for (int i = 0; i <= route.length; i++) {
+        final prev = i == 0 ? start : pos[route[i - 1]]!;
+        final nxt = i == route.length ? null : pos[route[i]]!;
+        final increase = _dist(prev, pos[next]!) + (nxt != null ? _dist(pos[next]!, nxt) - _dist(prev, nxt) : _dist(prev, pos[next]!));
+        if (increase < bestIncrease) {
+          bestIncrease = increase;
+          bestIdx = i;
+        }
+      }
+      route.insert(bestIdx, next);
+    }
+    return route;
+  }
+
+  /// 最適または準最適の巡回順を計算する（現在地→全ブースを回る順）
+  /// currentPosition: {'x': double, 'y': double}（なければ(0,0)）
+  Future<Map<String, dynamic>> computeOptimalRoute({
+    required List<String> targetBoothIds,
+    Map<String, double>? currentPosition,
+  }) async {
+    if (targetBoothIds.isEmpty) {
+      return {'order': <String>[], 'totalDistance': 0.0};
+    }
+
+    final start = currentPosition ?? {'x': 0.0, 'y': 0.0};
+    final positions = await _fetchBoothPositions(targetBoothIds.toSet());
+
+    // 座標が取れないブースを除外
+    final validTargets = targetBoothIds.where((id) => positions.containsKey(id)).toList();
+    if (validTargets.isEmpty) {
+      return {'order': <String>[], 'totalDistance': 0.0};
+    }
+
+    List<String> bestOrder = [];
+
+    if (validTargets.length <= _tspExactLimit) {
+      // 全探索
+      double best = double.infinity;
+      void permute(List<String> list, int l) {
+        if (l == list.length) {
+          final len = _routeLength(list, positions, start);
+          if (len < best) {
+            best = len;
+            bestOrder = List<String>.from(list);
+          }
+          return;
+        }
+        for (int i = l; i < list.length; i++) {
+          final tmp = list[l];
+          list[l] = list[i];
+          list[i] = tmp;
+          permute(list, l + 1);
+          list[i] = list[l];
+          list[l] = tmp;
+        }
+      }
+      permute(List<String>.from(validTargets), 0);
+    } else {
+      // 近傍挿入 + 2-opt
+      var route = _nearestInsertion(validTargets, positions, start);
+      route = _twoOpt(route, positions, start);
+      bestOrder = route;
+    }
+
+    final totalDistance = _routeLength(bestOrder, positions, start);
+    return {
+      'order': bestOrder,
+      'totalDistance': totalDistance,
+    };
+  }
   
   /// ビーコンの物理名をブースIDに変換
   String getBoothIdFromBeaconName(String beaconName) {
@@ -64,9 +370,18 @@ class FirebaseService {
             // 最新のレコードのlastDetectedAtを更新
             if (latestIndex >= 0) {
               existingVisitors[latestIndex] = Map<String, dynamic>.from(existingVisitors[latestIndex]);
-              existingVisitors[latestIndex]['lastDetectedAt'] = Timestamp.now();
+              final ts = existingVisitors[latestIndex]['timestamp'];
+              if (ts is Timestamp) {
+                final visitTime = ts.toDate();
+                final stayMinutes = ((now.difference(visitTime).inSeconds) / 60).ceil();
+                existingVisitors[latestIndex]['lastDetectedAt'] = Timestamp.now();
+                existingVisitors[latestIndex]['totalTime'] = stayMinutes;
+                print('最新レコード（インデックス$latestIndex）のlastDetectedAtとtotalTimeを更新: ${stayMinutes}分');
+              } else {
+                existingVisitors[latestIndex]['lastDetectedAt'] = Timestamp.now();
+                print('最新レコード（インデックス$latestIndex）のlastDetectedAtを更新（timestamp型不明）');
+              }
               updated = true;
-              print('最新レコード（インデックス$latestIndex）のlastDetectedAtを更新しました');
             }
           }
           
@@ -139,6 +454,7 @@ class FirebaseService {
               'userId': userId,
               'timestamp': Timestamp.now(),
               'lastDetectedAt': Timestamp.now(), // 最終検出時刻を追加
+              'totalTime': 0, // 滞在時間（分）
               'microsecondsSinceEpoch': DateTime.now().microsecondsSinceEpoch, // 一意性を確保
               'eventType': eventType,
               'age': visitorData['age'],
@@ -156,6 +472,7 @@ class FirebaseService {
               'userId': userId,
               'timestamp': Timestamp.now(),
               'lastDetectedAt': Timestamp.now(), // 最終検出時刻を追加
+              'totalTime': 0, // 滞在時間（分）
               'microsecondsSinceEpoch': DateTime.now().microsecondsSinceEpoch, // 一意性を確保
               'eventSource': 'BLE_Detection',
               'eventType': eventType,
@@ -213,8 +530,11 @@ class FirebaseService {
                   final timestamp = visitor['timestamp'];
                   if (timestamp is Timestamp && timestamp.toDate() == latestVisitTimestamp) {
                     existingVisitors[i] = Map<String, dynamic>.from(visitor);
+                    final visitTime = timestamp.toDate();
+                    final stayMinutes = ((now.difference(visitTime).inSeconds) / 60).ceil();
                     existingVisitors[i]['lastDetectedAt'] = Timestamp.now();
-                    print('最新レコードの lastDetectedAt を更新');
+                    existingVisitors[i]['totalTime'] = stayMinutes;
+                    print('最新レコードの lastDetectedAt と totalTime を更新: ${stayMinutes}分');
                     break;
                   }
                 }
@@ -412,6 +732,72 @@ class FirebaseService {
     } catch (e) {
       print('最新データ取得中にエラー: $e');
       return {};
+    }
+  }
+
+  /// リアルタイムでビーコン統計を監視（他のデバイスの更新も取得）
+  Stream<Map<String, dynamic>> watchTodayStats() {
+    try {
+      final today = DateTime.now();
+      final todayString = '${today.year}-${today.month.toString().padLeft(2, '0')}-${today.day.toString().padLeft(2, '0')}';
+      
+      print('=== リアルタイムリスナー開始: $todayString ===');
+      
+      return _firestore
+          .collection('beacon_counts')
+          .doc(todayString)
+          .collection('devices')
+          .snapshots()
+          .map((querySnapshot) {
+        final stats = <String, dynamic>{};
+        final now = DateTime.now();
+        const activeThreshold = Duration(seconds: 20); // 20秒以内をアクティブと判定
+        
+        for (final doc in querySnapshot.docs) {
+          final rawData = doc.data();
+          final isTestData = rawData['isTestData'] == true;
+          int displayCount = 0;
+          
+          if (isTestData) {
+            // テストデータの場合は、countフィールドをそのまま使用
+            displayCount = rawData['count'] ?? 0;
+          } else {
+            // 実際のデータの場合は、アクティブな来場者をカウント（最終検出時刻が20秒以内）
+            final visitors = rawData['visitors'];
+            if (visitors != null && visitors is List) {
+              for (final visitor in visitors) {
+                if (visitor is Map<String, dynamic>) {
+                  final lastDetectedAt = visitor['lastDetectedAt'];
+                  if (lastDetectedAt is Timestamp) {
+                    final lastDetectedTime = lastDetectedAt.toDate();
+                    final timeDiff = now.difference(lastDetectedTime);
+                    if (timeDiff <= activeThreshold) {
+                      displayCount++;
+                    }
+                  }
+                }
+              }
+            }
+          }
+          
+          final cleanData = <String, dynamic>{
+            'count': displayCount,
+            'totalVisits': rawData['count'] ?? 0,
+            'deviceName': rawData['deviceName'] ?? doc.id,
+            'firstSeen': rawData['firstSeen']?.toString() ?? '',
+            'lastSeen': rawData['lastSeen']?.toString() ?? '',
+            'isTestData': isTestData,
+          };
+          
+          stats[doc.id] = cleanData;
+        }
+        
+        print('リアルタイム更新: ${stats.length}件のビーコンデータ');
+        return stats;
+      });
+    } catch (e) {
+      print('リアルタイムリスナー設定中にエラー: $e');
+      return Stream.value({});
     }
   }
 
@@ -999,7 +1385,14 @@ class FirebaseService {
             'timestamp': v['timestamp'],
             'boothName': boothName,
             'eventType': v['eventType'],
+            'totalTime': v['totalTime'] ?? 0,
           });
+          
+          // 個別レコードにtotalTimeがあれば保持（最大値を採用）
+          final recordTotalTime = v['totalTime'] as int? ?? 0;
+          if (recordTotalTime > (u['totalTime'] as int)) {
+            u['totalTime'] = recordTotalTime;
+          }
           
           // 再訪問カウントは eventType == 'visit' のみ対象（同一ブースで30秒以上間隔が空いた場合のみカウント）
           if (v['eventType'] == 'visit') {
@@ -1014,16 +1407,6 @@ class FirebaseService {
             }
             lastVisitMap[boothId] = current;
           }
-          
-          // 滞在時間の推定（連続visitやlong_stayの間隔を利用）
-          final lastMap = (u['boothLastTimestamp'] as Map<String, DateTime>);
-          final last = lastMap[boothId];
-          final currentTs = v['timestamp'] as DateTime;
-          if (last != null) {
-            final diffMin = currentTs.difference(last).inMinutes;
-            if (diffMin > 0) u['totalTime'] = (u['totalTime'] as int) + diffMin;
-          }
-          lastMap[boothId] = currentTs;
         }
       }
       
@@ -1148,7 +1531,14 @@ class FirebaseService {
             'timestamp': v['timestamp'],
             'boothName': boothName,
             'eventType': v['eventType'],
+            'totalTime': v['totalTime'] ?? 0,
           });
+          
+          // 個別レコードにtotalTimeがあれば保持（最大値を採用）
+          final recordTotalTime = v['totalTime'] as int? ?? 0;
+          if (recordTotalTime > (u['totalTime'] as int)) {
+            u['totalTime'] = recordTotalTime;
+          }
           
           // 再訪問カウントは eventType == 'visit' のみ対象（同一ブースで30秒以上間隔が空いた場合のみカウント）
           if (v['eventType'] == 'visit') {
@@ -1163,16 +1553,6 @@ class FirebaseService {
             }
             lastVisitMap[boothId] = current;
           }
-          
-          // 滞在時間の推定（連続visitやlong_stayの間隔を利用）
-          final lastMap = (u['boothLastTimestamp'] as Map<String, DateTime>);
-          final last = lastMap[boothId];
-          final currentTs = v['timestamp'] as DateTime;
-          if (last != null) {
-            final diffMin = currentTs.difference(last).inMinutes;
-            if (diffMin > 0) u['totalTime'] = (u['totalTime'] as int) + diffMin;
-          }
-          lastMap[boothId] = currentTs;
         }
       }
       
@@ -2251,8 +2631,8 @@ class FirebaseService {
         'Booth-A12': {'x': 90, 'y': 470, 'name': 'ブースA12', 'width': 25, 'height': 25},
 
         // 中央上の通路（A08とA14の間）- 上から下へ
-        'FSC-BP104D': {'x': 240, 'y': 130, 'name': 'ブースA08', 'width': 25, 'height': 25},  // A08（ビーコン1）
-        'FSC-BP103B': {'x': 240, 'y': 190, 'name': 'ブースA09', 'width': 25, 'height': 25},  // A09（ビーコン2）
+        'FSC-BP103B': {'x': 240, 'y': 130, 'name': 'ブースA08', 'width': 25, 'height': 25},  // A08（ビーコン2）
+        'FSC-BP104D': {'x': 240, 'y': 190, 'name': 'ブースA09', 'width': 25, 'height': 25},  // A09（ビーコン1）
 
         // 中央下の通路（A09とA13の間）- 上から下へ
         'Booth-A10': {'x': 240, 'y': 400, 'name': 'ブースA10', 'width': 25, 'height': 25},
@@ -2704,7 +3084,7 @@ class FirebaseService {
     }
   }
 
-  /// 教室の全ブース座標を設定
+  /// 教室の全ブース座標を設定（8ブース版）
   Future<void> setupClassroomBooths() async {
     try {
       print('=== 教室ブース座標の設定開始 ===');
@@ -2719,30 +3099,21 @@ class FirebaseService {
       await batch.commit();
       print('既存のブースを削除しました: ${existingBooths.docs.length}件');
       
-      // ステップ2: 教室レイアウトに基づくブース座標マッピング（机と机の間の縦通路の中央に配置）
-      // ブースは小さな円形で、8つの机の間の通路の中央に配置（A09と同じ方法）
-      // 座標はiPhone画面サイズに最適化（400x650）
+      // ステップ2: 教室レイアウトに基づくブース座標マッピング（8ブース）
+      // 2列構成: 左列(A15→A14→A13)、右列(A08→A09→A10→A11→A12)
+      // 座標はシンプルな縦並びで再配置（400x650の目安）
       final boothPositions = {
-        // 左の縦通路（x=75）：左端の細長い机と左の太い机の間（通路の中央）
-        'FSC-BP104D': {'x': 75, 'y': 105, 'name': 'ブースA09', 'width': 20, 'height': 20},  // A09（左通路・上段上）
-        'Booth-A01': {'x': 75, 'y': 185, 'name': 'ブースA1', 'width': 20, 'height': 20},     // A1（左通路・上段下）
-        'Booth-A02': {'x': 75, 'y': 285, 'name': 'ブースA2', 'width': 20, 'height': 20},     // A2（左通路・下段上）
-        'Booth-A03': {'x': 75, 'y': 430, 'name': 'ブースA3', 'width': 20, 'height': 20},     // A3（左通路・下段中）
-        'Booth-A04': {'x': 75, 'y': 575, 'name': 'ブースA4', 'width': 20, 'height': 20},     // A4（左通路・下段下）
-        
-        // 中央の縦通路（x=180）：左の太い机と中央の太い机の間（通路の中央）
-        'Booth-A10': {'x': 180, 'y': 105, 'name': 'ブースA10', 'width': 20, 'height': 20},   // A10（中央通路・上段上）
-        'Booth-A08': {'x': 180, 'y': 185, 'name': 'ブースA8', 'width': 20, 'height': 20},    // A8（中央通路・上段下）
-        'Booth-A07': {'x': 180, 'y': 285, 'name': 'ブースA7', 'width': 20, 'height': 20},    // A7（中央通路・下段上）
-        'Booth-A06': {'x': 180, 'y': 430, 'name': 'ブースA6', 'width': 20, 'height': 20},    // A6（中央通路・下段中）
-        'Booth-A05': {'x': 180, 'y': 575, 'name': 'ブースA5', 'width': 20, 'height': 20},    // A5（中央通路・下段下）
-        
-        // 右の縦通路（x=280）：中央の太い机と右端の細長い机の間（通路の中央）
-        'Booth-A11': {'x': 280, 'y': 105, 'name': 'ブースA11', 'width': 20, 'height': 20},   // A11（右通路・上段上）
-        'Booth-A12': {'x': 280, 'y': 185, 'name': 'ブースA12', 'width': 20, 'height': 20},   // A12（右通路・上段下）
-        'Booth-A13': {'x': 280, 'y': 285, 'name': 'ブースA13', 'width': 20, 'height': 20},   // A13（右通路・下段上）
-        'Booth-A14': {'x': 280, 'y': 430, 'name': 'ブースA14', 'width': 20, 'height': 20},   // A14（右通路・下段中）
-        'Booth-A15': {'x': 280, 'y': 575, 'name': 'ブースA15 (FSC-BP103B)', 'width': 20, 'height': 20},   // A15（右通路・下段下、2台目のビーコン FSC-BP103B）
+        // 左列
+        'Booth-A15': {'x': 80, 'y': 110, 'name': 'ブースA15', 'width': 20, 'height': 20},
+        'Booth-A14': {'x': 80, 'y': 240, 'name': 'ブースA14', 'width': 20, 'height': 20},
+        'Booth-A13': {'x': 80, 'y': 370, 'name': 'ブースA13', 'width': 20, 'height': 20},
+        'Booth-A12': {'x': 80, 'y': 500, 'name': 'ブースA12', 'width': 20, 'height': 20},
+
+        // 右列
+        'FSC-BP103B': {'x': 240, 'y': 110, 'name': 'ブースA08', 'width': 20, 'height': 20},  // A08（ビーコン2）
+        'FSC-BP104D': {'x': 240, 'y': 190, 'name': 'ブースA09', 'width': 20, 'height': 20},  // A09（ビーコン1）
+        'Booth-A10': {'x': 240, 'y': 270, 'name': 'ブースA10', 'width': 20, 'height': 20},
+        'Booth-A11': {'x': 240, 'y': 350, 'name': 'ブースA11', 'width': 20, 'height': 20},
       };
       
       // ステップ3: 新しいブースを作成

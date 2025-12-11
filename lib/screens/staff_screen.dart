@@ -26,6 +26,10 @@ class _StaffScreenState extends State<StaffScreen> {
   bool _showHeatmap = true;
   int _crowdingThreshold = 25;
   
+  // マップレイアウト情報（Firebaseから動的に取得）
+  Map<String, dynamic>? _eventLayout;
+  List<Map<String, dynamic>> _mapElements = [];
+  
   // 混雑監視用の状態変数
   Map<String, bool> _crowdingAlerts = {};
   Timer? _monitoringTimer;
@@ -63,6 +67,9 @@ class _StaffScreenState extends State<StaffScreen> {
       final stats = await _firebaseService.getTodayStats();
       final booths = await _firebaseService.getAllBooths();
       
+      // マップレイアウトを読み込み
+      await _loadMapLayout();
+      
       // ブース情報を設定
       _beaconLocations = _convertBoothsToLocations(booths);
       
@@ -82,9 +89,49 @@ class _StaffScreenState extends State<StaffScreen> {
     }
   }
 
+  /// Firebaseからマップレイアウト情報を読み込む
+  Future<void> _loadMapLayout() async {
+    try {
+      print('=== マップレイアウトの読み込み開始 ===');
+      
+      // アクティブな展示会レイアウトを取得
+      final eventLayout = await _firebaseService.getActiveEventLayout();
+      
+      if (eventLayout == null) {
+        print('アクティブな展示会レイアウトがありません（デフォルトレイアウトを使用）');
+        setState(() {
+          _eventLayout = null;
+          _mapElements = [];
+        });
+        return;
+      }
+      
+      print('展示会レイアウトを取得: ${eventLayout['eventName']}');
+      
+      // マップ要素を取得
+      final mapElements = await _firebaseService.getMapElements(eventLayout['id']);
+      print('マップ要素を取得: ${mapElements.length}件');
+      
+      setState(() {
+        _eventLayout = eventLayout;
+        _mapElements = mapElements;
+      });
+      
+      print('=== マップレイアウトの読み込み完了 ===');
+    } catch (e) {
+      print('マップレイアウトの読み込み中にエラーが発生しました: $e');
+      // エラーの場合はデフォルトのレイアウトを使用
+      setState(() {
+        _eventLayout = null;
+        _mapElements = [];
+      });
+    }
+  }
+
   List<BeaconLocation> _convertBoothsToLocations(List<Map<String, dynamic>> booths) {
     final locations = <BeaconLocation>[];
     
+    // Firebaseから取得したブース情報のみを使用（デフォルトのブース情報は追加しない）
     for (final booth in booths) {
       final location = BeaconLocation(
         booth['id'] ?? '',
@@ -95,16 +142,6 @@ class _StaffScreenState extends State<StaffScreen> {
       );
       locations.add(location);
     }
-    
-    // デフォルトのブース情報も追加
-    locations.addAll([
-      BeaconLocation('Entrance-Main', 100, 50, '正面エントランス', BeaconType.entrance),
-      BeaconLocation('Entrance-Side', 300, 50, 'サイドエントランス', BeaconType.entrance),
-      BeaconLocation('Rest-Area1', 150, 100, '休憩エリア1', BeaconType.restArea),
-      BeaconLocation('Rest-Area2', 250, 300, '休憩エリア2', BeaconType.restArea),
-      BeaconLocation('Food-Court', 50, 400, 'フードコート', BeaconType.foodCourt),
-      BeaconLocation('Info-Desk', 200, 80, '総合案内', BeaconType.infoDesk),
-    ]);
     
     return locations;
   }
@@ -192,45 +229,49 @@ class _StaffScreenState extends State<StaffScreen> {
       builder: (BuildContext context) {
         int tempThreshold = _crowdingThreshold;
         
-        return AlertDialog(
-          title: const Text('混雑度閾値設定'),
-          content: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              const Text('何人の来場者で混雑とみなしますか？'),
-              const SizedBox(height: 16),
-              Slider(
-                value: tempThreshold.toDouble(),
-                min: 10,
-                max: 50,
-                divisions: 8,
-                label: '${tempThreshold}人',
-                onChanged: (value) {
-                  setState(() {
-                    tempThreshold = value.round();
-                  });
-                },
+        return StatefulBuilder(
+          builder: (BuildContext context, StateSetter setDialogState) {
+            return AlertDialog(
+              title: const Text('混雑度閾値設定'),
+              content: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  const Text('何人の来場者で混雑とみなしますか？'),
+                  const SizedBox(height: 16),
+                  Slider(
+                    value: tempThreshold.toDouble(),
+                    min: 1,
+                    max: 50,
+                    divisions: 49,
+                    label: '${tempThreshold}人',
+                    onChanged: (value) {
+                      setDialogState(() {
+                        tempThreshold = value.round();
+                      });
+                    },
+                  ),
+                  Text('${tempThreshold}人', style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
+                ],
               ),
-              Text('${tempThreshold}人', style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
-            ],
-          ),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.of(context).pop(),
-              child: const Text('キャンセル'),
-            ),
-            ElevatedButton(
-              onPressed: () {
-                setState(() {
-                  _crowdingThreshold = tempThreshold;
-                });
-                _notificationService.setCrowdingThreshold(tempThreshold);
-                Navigator.of(context).pop();
-                _checkCrowdingLevels(); // 新しい閾値で再チェック
-              },
-              child: const Text('設定'),
-            ),
-          ],
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.of(context).pop(),
+                  child: const Text('キャンセル'),
+                ),
+                ElevatedButton(
+                  onPressed: () {
+                    setState(() {
+                      _crowdingThreshold = tempThreshold;
+                    });
+                    _notificationService.setCrowdingThreshold(tempThreshold);
+                    Navigator.of(context).pop();
+                    _checkCrowdingLevels(); // 新しい閾値で再チェック
+                  },
+                  child: const Text('設定'),
+                ),
+              ],
+            );
+          },
         );
       },
     );
@@ -360,8 +401,8 @@ class _StaffScreenState extends State<StaffScreen> {
                             ),
                             const SizedBox(height: 16),
                             Container(
-                              height: 400,
-                              width: double.infinity,
+                              height: _eventLayout?['mapHeight']?.toDouble() ?? 400,
+                              width: _eventLayout?['mapWidth']?.toDouble() ?? double.infinity,
                               decoration: BoxDecoration(
                                 border: Border.all(color: Colors.grey.shade300),
                                 borderRadius: BorderRadius.circular(8),
@@ -372,8 +413,13 @@ class _StaffScreenState extends State<StaffScreen> {
                                   _todayStats,
                                   _crowdingAlerts,
                                   _crowdingThreshold,
+                                  mapElements: _mapElements,
+                                  eventLayout: _eventLayout,
                                 ),
-                                size: const Size(double.infinity, 400),
+                                size: Size(
+                                  _eventLayout?['mapWidth']?.toDouble() ?? 380,
+                                  _eventLayout?['mapHeight']?.toDouble() ?? 400,
+                                ),
                               ),
                             ),
                           ],
@@ -593,41 +639,30 @@ class StaffHeatmapPainter extends CustomPainter {
   final Map<String, dynamic> crowdData;
   final Map<String, bool> crowdingAlerts;
   final int crowdingThreshold;
+  final List<Map<String, dynamic>> mapElements; // マップ要素（Firebaseから取得）
+  final Map<String, dynamic>? eventLayout; // イベントレイアウト情報
 
   StaffHeatmapPainter(
     this.beacons,
     this.crowdData,
     this.crowdingAlerts,
-    this.crowdingThreshold,
-  );
+    this.crowdingThreshold, {
+    this.mapElements = const [],
+    this.eventLayout,
+  });
 
   @override
   void paint(Canvas canvas, Size size) {
     final paint = Paint();
     
-    // 背景を描画
-    paint.color = Colors.grey.shade50;
-    canvas.drawRect(Rect.fromLTWH(0, 0, size.width, size.height), paint);
-    
-    // 会場の外枠を描画
-    paint.color = Colors.grey.shade400;
-    paint.style = PaintingStyle.stroke;
-    paint.strokeWidth = 2;
-    canvas.drawRect(Rect.fromLTWH(20, 20, size.width - 40, size.height - 40), paint);
-    
-    // エントランスを描画
-    paint.color = Colors.brown.shade300;
-    paint.style = PaintingStyle.fill;
-    canvas.drawRect(Rect.fromLTWH(80, 20, 40, 20), paint);
-    canvas.drawRect(Rect.fromLTWH(280, 20, 40, 20), paint);
-    
-    // 通路を描画
-    paint.color = Colors.grey.shade200;
-    canvas.drawRect(Rect.fromLTWH(20, 80, size.width - 40, 30), paint);
-    canvas.drawRect(Rect.fromLTWH(20, 200, size.width - 40, 30), paint);
-    canvas.drawRect(Rect.fromLTWH(20, 320, size.width - 40, 30), paint);
-    canvas.drawRect(Rect.fromLTWH(140, 20, 30, size.height - 40), paint);
-    canvas.drawRect(Rect.fromLTWH(240, 20, 30, size.height - 40), paint);
+    // マップ要素がある場合は動的に描画、ない場合はデフォルトのハードコードされたレイアウトを使用
+    if (mapElements.isNotEmpty) {
+      // Firebaseから取得したマップ要素を描画
+      _drawMapElementsFromFirebase(canvas, size, paint);
+    } else {
+      // デフォルトのハードコードされたレイアウトを描画
+      _drawDefaultLayout(canvas, size, paint);
+    }
     
     // ビーコンと混雑状況を描画
     for (final beacon in beacons) {
@@ -734,6 +769,85 @@ class StaffHeatmapPainter extends CustomPainter {
       canvas,
       Offset(size.width - textPainter.width - 10, 30),
     );
+  }
+
+  /// Firebaseから取得したマップ要素を描画
+  void _drawMapElementsFromFirebase(Canvas canvas, Size size, Paint paint) {
+    // zIndexでソート（小さい値から順に描画）
+    final sortedElements = List<Map<String, dynamic>>.from(mapElements);
+    sortedElements.sort((a, b) {
+      final zA = (a['zIndex'] as num?)?.toInt() ?? 0;
+      final zB = (b['zIndex'] as num?)?.toInt() ?? 0;
+      return zA.compareTo(zB);
+    });
+    
+    for (final element in sortedElements) {
+      final shape = element['shape'] as String? ?? 'rect';
+      final x = (element['x'] as num?)?.toDouble() ?? 0.0;
+      final y = (element['y'] as num?)?.toDouble() ?? 0.0;
+      final width = (element['width'] as num?)?.toDouble() ?? 0.0;
+      final height = (element['height'] as num?)?.toDouble() ?? 0.0;
+      final colorHex = element['color'] as String? ?? '#EEEEEE';
+      final filled = element['filled'] as bool? ?? true;
+      final strokeWidth = (element['strokeWidth'] as num?)?.toDouble() ?? 1.0;
+      
+      // 16進数カラーをColorオブジェクトに変換
+      final color = _parseColor(colorHex);
+      
+      paint.color = color;
+      paint.style = filled ? PaintingStyle.fill : PaintingStyle.stroke;
+      paint.strokeWidth = strokeWidth;
+      
+      // 図形の種類に応じて描画
+      if (shape == 'rect') {
+        canvas.drawRect(Rect.fromLTWH(x, y, width, height), paint);
+      } else if (shape == 'circle') {
+        final radius = width / 2;
+        canvas.drawCircle(Offset(x + radius, y + radius), radius, paint);
+      }
+    }
+  }
+
+  /// デフォルトのハードコードされたレイアウトを描画
+  void _drawDefaultLayout(Canvas canvas, Size size, Paint paint) {
+    // 背景を描画
+    paint.color = Colors.grey.shade50;
+    canvas.drawRect(Rect.fromLTWH(0, 0, size.width, size.height), paint);
+    
+    // 会場の外枠を描画
+    paint.color = Colors.grey.shade400;
+    paint.style = PaintingStyle.stroke;
+    paint.strokeWidth = 2;
+    canvas.drawRect(Rect.fromLTWH(20, 20, size.width - 40, size.height - 40), paint);
+    
+    // エントランスを描画
+    paint.color = Colors.brown.shade300;
+    paint.style = PaintingStyle.fill;
+    canvas.drawRect(Rect.fromLTWH(80, 20, 40, 20), paint);
+    canvas.drawRect(Rect.fromLTWH(280, 20, 40, 20), paint);
+    
+    // 通路を描画
+    paint.color = Colors.grey.shade200;
+    canvas.drawRect(Rect.fromLTWH(20, 80, size.width - 40, 30), paint);
+    canvas.drawRect(Rect.fromLTWH(20, 200, size.width - 40, 30), paint);
+    canvas.drawRect(Rect.fromLTWH(20, 320, size.width - 40, 30), paint);
+    canvas.drawRect(Rect.fromLTWH(140, 20, 30, size.height - 40), paint);
+    canvas.drawRect(Rect.fromLTWH(240, 20, 30, size.height - 40), paint);
+  }
+
+  /// 16進数カラー文字列をColorオブジェクトに変換
+  Color _parseColor(String colorHex) {
+    try {
+      // "#RRGGBB" 形式を "0xFFRRGGBB" 形式に変換
+      String hexColor = colorHex.replaceAll('#', '');
+      if (hexColor.length == 6) {
+        hexColor = 'FF$hexColor';
+      }
+      return Color(int.parse(hexColor, radix: 16));
+    } catch (e) {
+      // パースエラーの場合はグレーを返す
+      return Colors.grey.shade200;
+    }
   }
 
   Color _getCrowdColor(int count) {

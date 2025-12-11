@@ -22,22 +22,79 @@ class _OrganizerScreenState extends State<OrganizerScreen> with TickerProviderSt
   int _selectedTabIndex = 0;
   late TabController _tabController;
 
+  Map<String, double> _boothStayTimeStats = {};
+  List<Map<String, dynamic>> _movementPatterns = [];
+
+  // ビーコンごとのRSSI閾値
+  Map<String, int> _rssiThresholds = {
+    'FSC-BP104D': -92,
+    'FSC-BP103B': -92,
+  };
+
   @override
   void initState() {
     super.initState();
-    _tabController = TabController(length: 5, vsync: this);
+    _tabController = TabController(length: 6, vsync: this);
     _tabController.addListener(() {
       setState(() {
         _selectedTabIndex = _tabController.index;
       });
     });
     _loadData();
+    _loadRssiThresholds();
   }
 
   @override
   void dispose() {
     _tabController.dispose();
     super.dispose();
+  }
+
+  /// ビーコンごとのRSSI閾値を読み込む
+  Future<void> _loadRssiThresholds() async {
+    try {
+      final thresholds = await _firebaseService.getAllBeaconRssiThresholds();
+      setState(() {
+        _rssiThresholds = thresholds;
+      });
+    } catch (e) {
+      print('ビーコンごとのRSSI閾値の読み込み中にエラーが発生しました: $e');
+    }
+  }
+
+  /// ビーコンごとのRSSI閾値を設定
+  Future<void> _setBeaconRssiThreshold(String beaconName, int threshold) async {
+    print('🔵 _setBeaconRssiThreshold 呼び出し: beaconName=$beaconName, threshold=$threshold');
+    print('🔵 現在の_rssiThresholds: $_rssiThresholds');
+    try {
+      print('🔵 FirebaseService.setBeaconRssiThreshold を呼び出し中...');
+      await _firebaseService.setBeaconRssiThreshold(beaconName, threshold);
+      print('🔵 FirebaseService.setBeaconRssiThreshold 完了');
+      setState(() {
+        _rssiThresholds[beaconName] = threshold;
+      });
+      print('🔵 setState完了: $_rssiThresholds');
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('$beaconName のRSSI閾値を${threshold} dBmに設定しました'),
+            backgroundColor: Colors.green,
+          ),
+        );
+      }
+      print('🔵 _setBeaconRssiThreshold 成功');
+    } catch (e, stackTrace) {
+      print('❌ ビーコン $beaconName のRSSI閾値の設定中にエラーが発生しました: $e');
+      print('❌ スタックトレース: $stackTrace');
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('$beaconName のRSSI閾値の設定に失敗しました: $e'),
+            backgroundColor: Colors.red,
+          ),
+        );
+      }
+    }
   }
 
   Future<void> _loadData() async {
@@ -50,6 +107,8 @@ class _OrganizerScreenState extends State<OrganizerScreen> with TickerProviderSt
       final stats = await _firebaseService.getTodayStats();
       final visitors = await _firebaseService.getAllVisitors();
       final companyStats = await _firebaseService.getCompanyAttributeStats();
+      final stayTimeStats = await _firebaseService.getBoothStayTimeStats();
+      final movementPatterns = await _firebaseService.getMovementPatterns();
       
       print('=== データ読み込み結果 ===');
       print('ユーザー名: $userName');
@@ -57,12 +116,16 @@ class _OrganizerScreenState extends State<OrganizerScreen> with TickerProviderSt
       print('来場者データ: ${visitors.length}件');
       print('来場者データ詳細: $visitors');
       print('企業属性統計: $companyStats');
+      print('滞在時間統計: $stayTimeStats');
+      print('移動パターン: $movementPatterns');
       
       setState(() {
         _userName = userName;
         _todayStats = stats;
         _visitorData = visitors;
         _companyAttributeStats = companyStats;
+        _boothStayTimeStats = stayTimeStats;
+        _movementPatterns = movementPatterns;
         _isLoading = false;
       });
     } catch (e) {
@@ -155,6 +218,13 @@ class _OrganizerScreenState extends State<OrganizerScreen> with TickerProviderSt
             onPressed: _loadData,
           ),
           IconButton(
+            icon: const Icon(Icons.store),
+            tooltip: '出展者管理へ',
+            onPressed: () {
+              Navigator.of(context).pushNamed('/exhibitor');
+            },
+          ),
+          IconButton(
             icon: const Icon(Icons.bug_report),
             onPressed: _debugData,
           ),
@@ -170,11 +240,12 @@ class _OrganizerScreenState extends State<OrganizerScreen> with TickerProviderSt
           unselectedLabelColor: Colors.white70,
           isScrollable: true,
           tabs: const [
-            Tab(text: 'heatmap'),
-            Tab(text: 'attribute'),
+            Tab(text: 'ヒートマップ'),
+            Tab(text: '年齢・性別'),
             Tab(text: '企業属性'),
             Tab(text: '興味分野'),
             Tab(text: '行動データ'),
+            Tab(text: '設定'),
           ],
         ),
       ),
@@ -191,6 +262,7 @@ class _OrganizerScreenState extends State<OrganizerScreen> with TickerProviderSt
                     _buildCompanyAttributeTab(isWideScreen),
                     _buildInterestTab(isWideScreen),
                     _buildBehaviorDataTab(isWideScreen),
+                    _buildSettingsTab(),
                   ],
                 );
               },
@@ -420,36 +492,6 @@ class _OrganizerScreenState extends State<OrganizerScreen> with TickerProviderSt
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          // デバッグ情報表示
-          Card(
-            color: Colors.orange.shade50,
-            child: Padding(
-              padding: const EdgeInsets.all(16.0),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  const Text(
-                    'デバッグ情報',
-                    style: TextStyle(
-                      fontSize: 16,
-                      fontWeight: FontWeight.bold,
-                      color: Colors.orange,
-                    ),
-                  ),
-                  const SizedBox(height: 8),
-                  Text('総来場者数: $totalVisitors'),
-                  Text('性別データ: $genderData'),
-                  Text('年齢データ: $ageData'),
-                  Text('来場者データ件数: ${_visitorData.length}'),
-                  if (_visitorData.isNotEmpty)
-                    Text('最初の来場者: ${_visitorData.first}'),
-                ],
-              ),
-            ),
-          ),
-          
-          const SizedBox(height: 16),
-          
           // 総来場者数
           Card(
             color: Colors.red.shade50,
@@ -1664,6 +1706,8 @@ class _OrganizerScreenState extends State<OrganizerScreen> with TickerProviderSt
   }
 
   Widget _buildBoothTimeStats() {
+    final boothTimeData = _boothStayTimeStats;
+
     return Card(
       elevation: 2,
       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
@@ -1673,21 +1717,113 @@ class _OrganizerScreenState extends State<OrganizerScreen> with TickerProviderSt
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             const Text(
-              'ブース別滞在時間統計',
+              'ブース別平均滞在時間 (分)',
               style: TextStyle(
                 fontSize: 18,
                 fontWeight: FontWeight.bold,
               ),
             ),
             const SizedBox(height: 24),
-            Container(
-              height: 150,
-              alignment: Alignment.center,
-              child: const Text(
-                '行動データがありません',
-                style: TextStyle(color: Colors.grey),
+            if (boothTimeData.isEmpty)
+              Container(
+                height: 150,
+                alignment: Alignment.center,
+                child: const Text(
+                  '滞在データがありません',
+                  style: TextStyle(color: Colors.grey),
+                ),
+              )
+            else
+              SizedBox(
+                height: 200,
+                child: BarChart(
+                  BarChartData(
+                    alignment: BarChartAlignment.spaceAround,
+                    maxY: (boothTimeData.values.isNotEmpty 
+                        ? boothTimeData.values.reduce(math.max) 
+                        : 10) * 1.2,
+                    barTouchData: BarTouchData(
+                      enabled: true,
+                      touchTooltipData: BarTouchTooltipData(
+                        getTooltipItem: (group, groupIndex, rod, rodIndex) {
+                          final boothName = boothTimeData.keys.elementAt(groupIndex);
+                          return BarTooltipItem(
+                            '$boothName\n${rod.toY.toInt()}分',
+                            const TextStyle(color: Colors.white, fontWeight: FontWeight.bold),
+                          );
+                        },
+                      ),
+                    ),
+                    titlesData: FlTitlesData(
+                      show: true,
+                      bottomTitles: AxisTitles(
+                        sideTitles: SideTitles(
+                          showTitles: true,
+                          getTitlesWidget: (value, meta) {
+                            final index = value.toInt();
+                            if (index >= 0 && index < boothTimeData.length) {
+                              return Padding(
+                                padding: const EdgeInsets.only(top: 8.0),
+                                child: Text(
+                                  boothTimeData.keys.elementAt(index).replaceAll('ブース', ''),
+                                  style: const TextStyle(fontSize: 10),
+                                ),
+                              );
+                            }
+                            return const Text('');
+                          },
+                          reservedSize: 30,
+                        ),
+                      ),
+                      leftTitles: AxisTitles(
+                        sideTitles: SideTitles(
+                          showTitles: true,
+                          reservedSize: 28,
+                          getTitlesWidget: (value, meta) {
+                            if (value == 0) return const SizedBox.shrink();
+                            return Text(
+                              value.toInt().toString(),
+                              style: const TextStyle(fontSize: 10),
+                            );
+                          },
+                        ),
+                      ),
+                      topTitles: const AxisTitles(sideTitles: SideTitles(showTitles: false)),
+                      rightTitles: const AxisTitles(sideTitles: SideTitles(showTitles: false)),
+                    ),
+                    borderData: FlBorderData(show: false),
+                    gridData: FlGridData(
+                      show: true,
+                      drawVerticalLine: false,
+                      horizontalInterval: 5,
+                      getDrawingHorizontalLine: (value) {
+                        return FlLine(
+                          color: Colors.grey.shade300,
+                          strokeWidth: 1,
+                        );
+                      },
+                    ),
+                    barGroups: boothTimeData.entries.toList().asMap().entries.map((entry) {
+                      final index = entry.key;
+                      final val = entry.value.value.toDouble();
+                      return BarChartGroupData(
+                        x: index,
+                        barRods: [
+                          BarChartRodData(
+                            toY: val,
+                            color: Colors.blue,
+                            width: 16,
+                            borderRadius: const BorderRadius.only(
+                              topLeft: Radius.circular(4),
+                              topRight: Radius.circular(4),
+                            ),
+                          ),
+                        ],
+                      );
+                    }).toList(),
+                  ),
+                ),
               ),
-            ),
           ],
         ),
       ),
@@ -1695,6 +1831,8 @@ class _OrganizerScreenState extends State<OrganizerScreen> with TickerProviderSt
   }
 
   Widget _buildBoothDetailStats() {
+    final transitionData = _movementPatterns;
+
     return Card(
       elevation: 2,
       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
@@ -1704,21 +1842,64 @@ class _OrganizerScreenState extends State<OrganizerScreen> with TickerProviderSt
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             const Text(
-              'ブース別詳細統計',
+              'よくある移動パターン (TOP5)',
               style: TextStyle(
                 fontSize: 18,
                 fontWeight: FontWeight.bold,
               ),
             ),
-            const SizedBox(height: 24),
-            Container(
-              height: 150, // 高さを揃える
-              alignment: Alignment.center,
-              child: const Text(
-                '統計データがありません',
-                style: TextStyle(color: Colors.grey),
+            const SizedBox(height: 16),
+            if (transitionData.isEmpty)
+              Container(
+                height: 150,
+                alignment: Alignment.center,
+                child: const Text(
+                  '移動データがありません',
+                  style: TextStyle(color: Colors.grey),
+                ),
+              )
+            else
+              ListView.separated(
+                shrinkWrap: true,
+                physics: const NeverScrollableScrollPhysics(),
+                itemCount: transitionData.length,
+                separatorBuilder: (context, index) => const Divider(),
+                itemBuilder: (context, index) {
+                  final item = transitionData[index];
+                  return ListTile(
+                    leading: Container(
+                      width: 30,
+                      height: 30,
+                      alignment: Alignment.center,
+                      decoration: BoxDecoration(
+                        color: index < 3 ? Colors.amber : Colors.grey.shade300,
+                        shape: BoxShape.circle,
+                      ),
+                      child: Text(
+                        '${index + 1}',
+                        style: TextStyle(
+                          color: index < 3 ? Colors.white : Colors.black54,
+                          fontWeight: FontWeight.bold,
+                        ),
+                      ),
+                    ),
+                    title: Row(
+                      children: [
+                        Text(item['from'].toString()),
+                        const Padding(
+                          padding: EdgeInsets.symmetric(horizontal: 8.0),
+                          child: Icon(Icons.arrow_forward, size: 16, color: Colors.grey),
+                        ),
+                        Text(item['to'].toString()),
+                      ],
+                    ),
+                    trailing: Text(
+                      '${item['count']}人',
+                      style: const TextStyle(fontWeight: FontWeight.bold),
+                    ),
+                  );
+                },
               ),
-            ),
           ],
         ),
       ),
@@ -1782,6 +1963,159 @@ class _OrganizerScreenState extends State<OrganizerScreen> with TickerProviderSt
       default:
         return Colors.grey;
     }
+  }
+
+  /// 設定タブを構築
+  Widget _buildSettingsTab() {
+    return Padding(
+      padding: const EdgeInsets.all(16.0),
+      child: SingleChildScrollView(
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Text(
+              'システム設定',
+              style: TextStyle(
+                fontSize: 24,
+                fontWeight: FontWeight.bold,
+              ),
+            ),
+            const SizedBox(height: 24),
+            
+            // ビーコンごとのRSSI閾値設定
+            Card(
+              child: Padding(
+                padding: const EdgeInsets.all(16.0),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    const Row(
+                      children: [
+                        Icon(Icons.signal_cellular_alt, color: Colors.purple),
+                        SizedBox(width: 8),
+                        Text(
+                          'ビーコンごとのRSSI閾値設定',
+                          style: TextStyle(
+                            fontSize: 20,
+                            fontWeight: FontWeight.bold,
+                          ),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 16),
+                    const Text(
+                      '各ビーコンの検出範囲を個別に設定できます。\n'
+                      'この値以下の信号は検出されません（ブースから遠すぎると判断されます）。',
+                      style: TextStyle(fontSize: 14, color: Colors.grey),
+                    ),
+                    const SizedBox(height: 24),
+                    // 各ビーコンの設定
+                    ..._rssiThresholds.keys.map((beaconName) {
+                      final currentThreshold = _rssiThresholds[beaconName] ?? -92;
+                      return Padding(
+                        padding: const EdgeInsets.only(bottom: 24.0),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              beaconName,
+                              style: const TextStyle(
+                                fontSize: 18,
+                                fontWeight: FontWeight.bold,
+                                color: Colors.purple,
+                              ),
+                            ),
+                            const SizedBox(height: 8),
+                            Text(
+                              '現在の閾値: $currentThreshold dBm',
+                              style: const TextStyle(
+                                fontSize: 16,
+                              ),
+                            ),
+                            const SizedBox(height: 8),
+                            Slider(
+                              value: currentThreshold.toDouble(),
+                              min: -120,
+                              max: -50,
+                              divisions: 70,
+                              label: '$currentThreshold dBm',
+                              onChanged: (value) {
+                                setState(() {
+                                  _rssiThresholds[beaconName] = value.round();
+                                });
+                              },
+                            ),
+                            const SizedBox(height: 8),
+                            Row(
+                              mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+                              children: [
+                                ElevatedButton.icon(
+                                  onPressed: () => _setBeaconRssiThreshold(
+                                    beaconName,
+                                    _rssiThresholds[beaconName] ?? -92,
+                                  ),
+                                  icon: const Icon(Icons.save, size: 18),
+                                  label: const Text('保存'),
+                                  style: ElevatedButton.styleFrom(
+                                    backgroundColor: Colors.purple,
+                                    foregroundColor: Colors.white,
+                                    padding: const EdgeInsets.symmetric(
+                                      horizontal: 16,
+                                      vertical: 8,
+                                    ),
+                                  ),
+                                ),
+                                OutlinedButton.icon(
+                                  onPressed: () {
+                                    setState(() {
+                                      _rssiThresholds[beaconName] = -92;
+                                    });
+                                  },
+                                  icon: const Icon(Icons.restore, size: 18),
+                                  label: const Text('デフォルト(-92)'),
+                                  style: OutlinedButton.styleFrom(
+                                    padding: const EdgeInsets.symmetric(
+                                      horizontal: 16,
+                                      vertical: 8,
+                                    ),
+                                  ),
+                                ),
+                              ],
+                            ),
+                            if (beaconName != _rssiThresholds.keys.last)
+                              const Divider(height: 24),
+                          ],
+                        ),
+                      );
+                    }).toList(),
+                    const SizedBox(height: 16),
+                    Row(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      children: [
+                        OutlinedButton.icon(
+                          onPressed: _loadRssiThresholds,
+                          icon: const Icon(Icons.refresh),
+                          label: const Text('すべてリロード'),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 16),
+                    const Text(
+                      '推奨値:\n'
+                      '• -92 dBm: ブースの角（2.12m）をカバー（デフォルト）\n'
+                      '• -86 dBm: 1.5m以内をカバー\n'
+                      '• -78 dBm: 1.0m以内をカバー\n'
+                      '• -70 dBm: 0.5m以内をカバー',
+                      style: TextStyle(fontSize: 12, color: Colors.grey),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
   }
 }
 

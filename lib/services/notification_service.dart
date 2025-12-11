@@ -12,7 +12,7 @@ class NotificationService {
   final FlutterLocalNotificationsPlugin _localNotifications = FlutterLocalNotificationsPlugin();
 
   // 混雑度の閾値設定
-  static const int _crowdingThreshold = 25; // 25人以上で混雑とみなす
+  int _crowdingThreshold = 25; // デフォルトは25人以上で混雑とみなす
 
   Future<void> initialize() async {
     try {
@@ -95,14 +95,13 @@ class NotificationService {
   }
 
   // 混雑度に基づく通知を送信
+  // 注意: このメソッドは既に閾値チェック後に呼ばれるため、ここでの閾値チェックは不要
   Future<void> sendCrowdingNotification(String boothName, int visitorCount) async {
-    if (visitorCount >= _crowdingThreshold) {
-      final title = '混雑警報';
-      final body = '$boothNameが混雑しています（現在${visitorCount}人）';
-      
-      await _showLocalNotification(title, body, boothName);
-      print('混雑通知を送信: $boothName - ${visitorCount}人');
-    }
+    final title = '混雑警報';
+    final body = '$boothNameが混雑しています（現在${visitorCount}人）';
+    
+    await _showLocalNotification(title, body, boothName);
+    print('混雑通知を送信: $boothName - ${visitorCount}人（閾値: ${_crowdingThreshold}人）');
   }
 
   // ローカル通知を表示
@@ -167,7 +166,7 @@ class NotificationService {
 
   // 混雑度の閾値を設定
   Future<void> setCrowdingThreshold(int threshold) async {
-    // 設定を保存する処理を追加（SharedPreferences等）
+    _crowdingThreshold = threshold;
     print('混雑度閾値を${threshold}人に設定しました');
   }
 }

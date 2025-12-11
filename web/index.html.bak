@@ -38,7 +38,7 @@
     // エラーハンドリングを追加
     window.addEventListener('error', function(e) {
       console.error('JavaScriptエラー:', e.error);
-      // エラーを表示しない
+      document.body.innerHTML = '<div style="padding: 20px; font-family: sans-serif;"><h1 style="color: red;">エラーが発生しました</h1><p>' + e.error + '</p><p>ブラウザのコンソールを確認してください。</p></div>';
     });
     
     // Flutterアプリの読み込みエラーをキャッチ

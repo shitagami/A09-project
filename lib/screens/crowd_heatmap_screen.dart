@@ -34,12 +34,15 @@ class _CrowdHeatmapScreenState extends State<CrowdHeatmapScreen> {
   // ブースの角（2.12m）をカバーするには-92 dBm必要
   // 注意: -92 dBmより弱い信号は除外される
   static const int kRssiThreshold = -92;
+  Map<String, int> _rssiThresholds = {};
   
   Map<String, dynamic> _todayStats = {};
   bool _isLoading = true;
   String _userName = '';
   Map<String, BeaconDetectionInfo> _detectedBeacons = {};  // RSSI値も保存
   Set<String> _countedToday = {};
+  // ブースのお気に入り（ToDoリスト）: ローカルのみで管理
+  Set<String> _bookmarkedBoothIds = {};
   
   // ルート表示用の状態変数
   bool _showingRoute = false;
@@ -156,6 +159,7 @@ class _CrowdHeatmapScreenState extends State<CrowdHeatmapScreen> {
   // スキャン状態の管理
   bool _isScanning = false;
   StreamSubscription<List<ScanResult>>? _scanSubscription; // スキャン結果のリスナー
+  StreamSubscription<Map<String, dynamic>>? _realtimeStatsSubscription; // リアルタイム統計のリスナー
   
   // 混雑監視用の状態変数
   Timer? _monitoringTimer;
@@ -164,6 +168,9 @@ class _CrowdHeatmapScreenState extends State<CrowdHeatmapScreen> {
   
   // タイムスタンプ更新用のタイマー
   Timer? _timestampUpdateTimer;
+  
+  // リアルタイム統計データ（他のデバイスからの更新を含む）
+  Map<String, dynamic> _realtimeStats = {};
 
   @override
   void initState() {
@@ -171,7 +178,10 @@ class _CrowdHeatmapScreenState extends State<CrowdHeatmapScreen> {
     _loadUserData();
     _loadMapLayout(); // Firebaseからマップレイアウトを読み込み
     _loadBoothData(); // Firebaseからブース情報を読み込み
+    _loadRssiThresholds(); // RSSI閾値をFirebaseから取得
     _loadCrowdData();
+    // リアルタイムリスナーを開始（他のデバイスの更新も取得）
+    _startRealtimeStatsListener();
     // 30秒ごとにデータを更新
     _startPeriodicUpdate();
     // 混雑監視を開始
@@ -186,6 +196,7 @@ class _CrowdHeatmapScreenState extends State<CrowdHeatmapScreen> {
   void dispose() {
     FlutterBluePlus.stopScan();
     _scanSubscription?.cancel(); // スキャン結果リスナーをクリア
+    _realtimeStatsSubscription?.cancel(); // リアルタイム統計リスナーをクリア
     _monitoringTimer?.cancel();
     _timestampUpdateTimer?.cancel();
     super.dispose();
@@ -200,6 +211,28 @@ class _CrowdHeatmapScreenState extends State<CrowdHeatmapScreen> {
     } catch (e) {
       print('ユーザー名の読み込みエラー: $e');
     }
+  }
+
+  Future<void> _loadRssiThresholds() async {
+    try {
+      final thresholds = await _firebaseService.getAllBeaconRssiThresholds();
+      setState(() {
+        _rssiThresholds = thresholds;
+      });
+      print('RSSI閾値を取得: $_rssiThresholds');
+    } catch (e) {
+      print('RSSI閾値読み込みエラー: $e');
+    }
+  }
+
+  Future<void> _toggleBookmark(BeaconLocation booth) async {
+    setState(() {
+      if (_bookmarkedBoothIds.contains(booth.id)) {
+        _bookmarkedBoothIds.remove(booth.id);
+      } else {
+        _bookmarkedBoothIds.add(booth.id);
+      }
+    });
   }
 
   /// Firebaseからマップレイアウト情報を読み込む
@@ -259,6 +292,7 @@ class _CrowdHeatmapScreenState extends State<CrowdHeatmapScreen> {
       
       setState(() {
         _todayStats = stats;
+        _realtimeStats = stats; // リアルタイム統計も初期化
         _isLoading = false;
       });
       print('=== 混雑データの読み込み完了 ===');
@@ -267,6 +301,29 @@ class _CrowdHeatmapScreenState extends State<CrowdHeatmapScreen> {
       setState(() {
         _isLoading = false;
       });
+    }
+  }
+
+  /// リアルタイム統計リスナーを開始（他のデバイスの更新も取得）
+  void _startRealtimeStatsListener() {
+    try {
+      print('=== リアルタイム統計リスナー開始 ===');
+      _realtimeStatsSubscription = _firebaseService.watchTodayStats().listen(
+        (stats) {
+          print('リアルタイム統計更新を受信: ${stats.length}件');
+          setState(() {
+            _realtimeStats = stats;
+            // _todayStatsも更新（詳細ダイアログ用）
+            _todayStats = stats;
+          });
+        },
+        onError: (error) {
+          print('リアルタイム統計リスナーエラー: $error');
+        },
+      );
+      print('=== リアルタイム統計リスナー設定完了 ===');
+    } catch (e) {
+      print('リアルタイム統計リスナー設定中にエラー: $e');
     }
   }
 
@@ -456,8 +513,9 @@ class _CrowdHeatmapScreenState extends State<CrowdHeatmapScreen> {
           print('ビーコン検出: $beaconName (RSSI: $rssi dBm) → $boothId');
           
           // RSSI閾値チェック: 閾値以下は除外（ブースから遠すぎる）
-          if (rssi < kRssiThreshold) {
-            print('  ⚠️ RSSI値が閾値以下のため無視: $rssi < $kRssiThreshold dBm');
+          final threshold = _rssiThresholds[boothId] ?? kRssiThreshold;
+          if (rssi < threshold) {
+            print('  ⚠️ RSSI値が閾値以下のため無視: $rssi < $threshold dBm');
             
             // 既に検出済みのビーコンが閾値以下になった場合、即座に削除
             if (_detectedBeacons.containsKey(boothId)) {
@@ -469,7 +527,7 @@ class _CrowdHeatmapScreenState extends State<CrowdHeatmapScreen> {
             continue;
           }
           
-          print('  ✅ RSSI OK → ブースID: $boothId');
+          print('  ✅ RSSI OK (閾値 $threshold dBm) → ブースID: $boothId');
           
           // 現在のスキャンで検出されたビーコンとして記録
           currentlyDetectedBeacons.add(boothId);
@@ -516,6 +574,13 @@ class _CrowdHeatmapScreenState extends State<CrowdHeatmapScreen> {
             if (_recentlyProcessedUserBeacon.contains(userBeaconKey)) {
               final remainingSeconds = 5 - now.difference(lastProcessed ?? now).inSeconds;
               print('ユーザー $userId のビーコン $name は最近処理されました。次回処理まで: ${remainingSeconds}秒');
+              continue;
+            }
+
+            // オーバーレイが表示されているブースのみカウントする
+            final isOverlayTarget = _showBoothOverlay && _nearbyBooth?.id == name;
+            if (!isOverlayTarget) {
+              print('オーバーレイ対象外のためカウントをスキップ: $name');
               continue;
             }
             
@@ -883,29 +948,35 @@ class _CrowdHeatmapScreenState extends State<CrowdHeatmapScreen> {
                           ),
                           const Divider(height: 24),
                           
-                          // 特徴・アピールポイント
-                          if (booth.boothDetails!.features.isNotEmpty) ...[
-                            Row(
-                              children: [
-                                Icon(Icons.star, color: Colors.orange.shade600, size: 20),
-                                const SizedBox(width: 8),
-                                const Text(
-                                  '特徴・アピールポイント',
-                                  style: TextStyle(
-                                    fontSize: 14,
-                                    fontWeight: FontWeight.bold,
-                                  ),
+                          // 特徴・アピールポイント（空なら「準備中」を表示）
+                          Row(
+                            children: [
+                              Icon(Icons.star, color: Colors.orange.shade600, size: 20),
+                              const SizedBox(width: 8),
+                              const Text(
+                                '特徴・アピールポイント',
+                                style: TextStyle(
+                                  fontSize: 14,
+                                  fontWeight: FontWeight.bold,
                                 ),
-                              ],
-                            ),
-                            const SizedBox(height: 8),
+                              ),
+                            ],
+                          ),
+                          const SizedBox(height: 8),
+                          if (booth.boothDetails!.features.isEmpty)
+                            const Padding(
+                              padding: EdgeInsets.only(left: 28),
+                              child: Text('準備中', style: TextStyle(fontSize: 13)),
+                            )
+                          else
                             ...booth.boothDetails!.features.asMap().entries.map((entry) {
                               return Padding(
                                 padding: const EdgeInsets.only(bottom: 4),
                                 child: Row(
                                   crossAxisAlignment: CrossAxisAlignment.start,
                                   children: [
-                                    Text('${entry.key + 1}. ', 
+                                    Text(
+                                      '${entry.key + 1}. ',
                                       style: TextStyle(
                                         color: Colors.orange.shade700,
                                         fontWeight: FontWeight.bold,
@@ -921,34 +992,38 @@ class _CrowdHeatmapScreenState extends State<CrowdHeatmapScreen> {
                                 ),
                               );
                             }),
-                            const Divider(height: 24),
-                          ],
+                          const Divider(height: 24),
                           
-                          // 製品・サービス
-                          if (booth.boothDetails!.products.isNotEmpty && 
-                              booth.boothDetails!.products.first != '準備中') ...[
-                            Row(
-                              children: [
-                                Icon(Icons.inventory_2, color: Colors.purple.shade600, size: 20),
-                                const SizedBox(width: 8),
-                                const Text(
-                                  '製品・サービス',
-                                  style: TextStyle(
-                                    fontSize: 14,
-                                    fontWeight: FontWeight.bold,
-                                  ),
+                          // 製品・サービス（空なら「準備中」を表示）
+                          Row(
+                            children: [
+                              Icon(Icons.inventory_2, color: Colors.purple.shade600, size: 20),
+                              const SizedBox(width: 8),
+                              const Text(
+                                '製品・サービス',
+                                style: TextStyle(
+                                  fontSize: 14,
+                                  fontWeight: FontWeight.bold,
                                 ),
-                              ],
-                            ),
-                            const SizedBox(height: 8),
+                              ),
+                            ],
+                          ),
+                          const SizedBox(height: 8),
+                          if (booth.boothDetails!.products.isEmpty)
+                            const Padding(
+                              padding: EdgeInsets.only(left: 28),
+                              child: Text('準備中', style: TextStyle(fontSize: 13)),
+                            )
+                          else
                             ...booth.boothDetails!.products.map((product) {
                               return Padding(
                                 padding: const EdgeInsets.only(bottom: 4),
                                 child: Row(
                                   crossAxisAlignment: CrossAxisAlignment.start,
                                   children: [
-                                    Icon(Icons.chevron_right, 
-                                      color: Colors.purple.shade600, 
+                                    Icon(
+                                      Icons.chevron_right,
+                                      color: Colors.purple.shade600,
                                       size: 16,
                                     ),
                                     Expanded(
@@ -961,8 +1036,7 @@ class _CrowdHeatmapScreenState extends State<CrowdHeatmapScreen> {
                                 ),
                               );
                             }),
-                            const Divider(height: 24),
-                          ],
+                          const Divider(height: 24),
                           
                           // 連絡先情報
                           if (booth.boothDetails!.contactEmail != 'info@example.com') ...[
@@ -1194,8 +1268,54 @@ class _CrowdHeatmapScreenState extends State<CrowdHeatmapScreen> {
     );
   }
 
+  /// 現在地ブース（検出ビーコン > エントランス > 先頭）を必ず返す
+  BeaconLocation _getStartBoothOrDefault() {
+    // 検出中のビーコン優先
+    if (_detectedBeacons.isNotEmpty) {
+      for (final beaconName in _detectedBeacons.keys) {
+        final detectedBooth = _beaconLocations.firstWhere(
+          (b) => b.id == beaconName,
+          orElse: () => _beaconLocations.isNotEmpty
+              ? _beaconLocations.first
+              : BeaconLocation('default', 0, 0, 'デフォルト', BeaconType.booth),
+        );
+        if (detectedBooth.id == beaconName) {
+          return detectedBooth;
+        }
+      }
+    }
+    // エントランスがあれば使用
+    final entrance = _beaconLocations.where((b) => b.type == BeaconType.entrance);
+    if (entrance.isNotEmpty) {
+      return entrance.first;
+    }
+    // 最後に先頭
+    if (_beaconLocations.isNotEmpty) {
+      return _beaconLocations.first;
+    }
+    // 万一なければダミー
+    return BeaconLocation('default', 0, 0, 'デフォルト', BeaconType.booth);
+  }
+
   /// ルート提案ダイアログを表示
   Future<void> _showRouteSuggestionDialog() async {
+    // 現在地（ソート用: 混雑が同じときは近い順にする）
+    final startBooth = _getStartBoothOrDefault();
+
+    double _dist(BeaconLocation a, BeaconLocation b) {
+      return (Offset(a.x, a.y) - Offset(b.x, b.y)).distance;
+    }
+
+    double _routeLength(BeaconLocation start, List<BeaconLocation> seq) {
+      var len = 0.0;
+      var cur = start;
+      for (final n in seq) {
+        len += _dist(cur, n);
+        cur = n;
+      }
+      return len;
+    }
+
     // 空いているブースをリストアップ（混雑度が低い順）
     final availableBooths = _beaconLocations
         .where((b) => b.type == BeaconType.booth)
@@ -1203,8 +1323,60 @@ class _CrowdHeatmapScreenState extends State<CrowdHeatmapScreen> {
         ..sort((a, b) {
           final countA = _todayStats[a.id]?['count'] ?? 0;
           final countB = _todayStats[b.id]?['count'] ?? 0;
-          return countA.compareTo(countB);
+          final distA = (Offset(a.x, a.y) - Offset(startBooth.x, startBooth.y)).distance;
+          final distB = (Offset(b.x, b.y) - Offset(startBooth.x, startBooth.y)).distance;
+          final scoreA = countA * 1000 + distA; // 混雑を優先しつつ距離も反映
+          final scoreB = countB * 1000 + distB;
+          return scoreA.compareTo(scoreB);
         });
+
+    List<List<BeaconLocation>> _permute(List<BeaconLocation> list) {
+      final res = <List<BeaconLocation>>[];
+      void backtrack(List<BeaconLocation> cur, List<BeaconLocation> rem) {
+        if (rem.isEmpty) {
+          res.add(List.of(cur));
+          return;
+        }
+        for (int i = 0; i < rem.length; i++) {
+          final next = rem[i];
+          final rest = List<BeaconLocation>.from(rem)..removeAt(i);
+          cur.add(next);
+          backtrack(cur, rest);
+          cur.removeLast();
+        }
+      }
+      backtrack([], list);
+      return res;
+    }
+
+    // 上位候補から距離トータルが最小になる3件を選ぶ（クラスタ優先）
+    List<BeaconLocation> _pickBestTriplet(List<BeaconLocation> candidates, int takeCount) {
+      final top = candidates.take(6).toList(); // 候補を6件に絞る
+      if (top.length <= takeCount) return top;
+      List<BeaconLocation> best = top.take(takeCount).toList();
+      double bestLen = double.infinity;
+      void dfs(List<BeaconLocation> chosen, int idx) {
+        if (chosen.length == takeCount) {
+          // 全順列を試す
+          final perms = _permute(chosen);
+          for (final p in perms) {
+            final len = _routeLength(startBooth, p);
+            if (len < bestLen) {
+              bestLen = len;
+              best = List<BeaconLocation>.from(p);
+            }
+          }
+          return;
+        }
+        for (int i = idx; i < top.length; i++) {
+          chosen.add(top[i]);
+          dfs(chosen, i + 1);
+          chosen.removeLast();
+        }
+      }
+      dfs([], 0);
+      return best;
+    }
     
     showDialog(
       context: context,
@@ -1228,9 +1400,24 @@ class _CrowdHeatmapScreenState extends State<CrowdHeatmapScreen> {
                   style: TextStyle(fontSize: 14, color: Colors.black87),
                 ),
                 const SizedBox(height: 16),
-                const Text(
-                  '訪問したいブースを選択してください:',
-                  style: TextStyle(fontWeight: FontWeight.bold),
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                  children: [
+                    const Text(
+                      '訪問したいブースを選択してください:',
+                      style: TextStyle(fontWeight: FontWeight.bold),
+                    ),
+                    Row(
+                      children: [
+                        const Icon(Icons.star, color: Colors.amber, size: 18),
+                        const SizedBox(width: 4),
+                        Text(
+                          '${_bookmarkedBoothIds.length}件',
+                          style: const TextStyle(fontSize: 12, color: Colors.grey),
+                        ),
+                      ],
+                    ),
+                  ],
                 ),
                 const SizedBox(height: 12),
                 SizedBox(
@@ -1240,7 +1427,8 @@ class _CrowdHeatmapScreenState extends State<CrowdHeatmapScreen> {
                     itemCount: availableBooths.length,
                     itemBuilder: (context, index) {
                       final booth = availableBooths[index];
-                      final count = _todayStats[booth.id]?['count'] ?? 0;
+                      // リアルタイム: 現在検出中のユーザー数で混雑度表示
+                      final count = _activeUsers[booth.id]?.length ?? 0;
                       final crowdColor = _getCrowdColor(count);
                       final crowdText = _getCrowdText(count);
                       final hasDetails = booth.boothDetails != null;
@@ -1285,7 +1473,31 @@ class _CrowdHeatmapScreenState extends State<CrowdHeatmapScreen> {
                               ),
                             ],
                           ),
-                          trailing: const Icon(Icons.arrow_forward),
+                          trailing: Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              IconButton(
+                                icon: Icon(
+                                  _bookmarkedBoothIds.contains(booth.id)
+                                      ? Icons.star
+                                      : Icons.star_border,
+                                  color: _bookmarkedBoothIds.contains(booth.id)
+                                      ? Colors.amber
+                                      : Colors.grey,
+                                ),
+                                onPressed: () => _toggleBookmark(booth),
+                                tooltip: 'お気に入り',
+                              ),
+                              IconButton(
+                                icon: const Icon(Icons.route),
+                                onPressed: () {
+                                  Navigator.of(context).pop();
+                                  _showRouteToBooths([booth]);
+                                },
+                                tooltip: 'このブースへ',
+                              ),
+                            ],
+                          ),
                           onTap: () {
                             Navigator.of(context).pop();
                             _showRouteToBooths([booth]);
@@ -1302,10 +1514,16 @@ class _CrowdHeatmapScreenState extends State<CrowdHeatmapScreen> {
             TextButton(
               onPressed: () {
                 Navigator.of(context).pop();
-                // 上位3つの空いているブースへの周遊ルートを提案
-                if (availableBooths.length >= 3) {
-                  _showRouteToBooths(availableBooths.take(3).toList());
-                }
+                _showOptimalRouteForBookmarks();
+              },
+              child: const Text('お気に入りを周遊'),
+            ),
+            TextButton(
+              onPressed: () {
+                Navigator.of(context).pop();
+                // 上位候補から距離が短い3ブースを周遊
+                final picked = _pickBestTriplet(availableBooths, 3);
+                _showRouteToBooths(picked, keepOrder: true);
               },
               child: const Text('空いている3ブースを周遊'),
             ),
@@ -1320,38 +1538,34 @@ class _CrowdHeatmapScreenState extends State<CrowdHeatmapScreen> {
   }
   
   /// 指定されたブースへのルートを表示
-  void _showRouteToBooths(List<BeaconLocation> targetBooths) {
+  void _showRouteToBooths(List<BeaconLocation> targetBooths, {bool keepOrder = false}) {
     if (targetBooths.isEmpty) return;
     
-    // 現在地を決定：検出中のビーコンがあればそれを使用、なければエントランス
-    BeaconLocation? startBooth;
+    // 現在地（検出ビーコン > エントランス > 先頭）
+    final startBooth = _getStartBoothOrDefault();
     
-    // 検出中のビーコンの中からブースまたはエリアを探す
-    if (_detectedBeacons.isNotEmpty) {
-      for (final beaconName in _detectedBeacons.keys) {
-        final detectedBooth = _beaconLocations.firstWhere(
-          (b) => b.id == beaconName,
-          orElse: () => _beaconLocations.first,
-        );
-        if (detectedBooth.id == beaconName) {
-          startBooth = detectedBooth;
-          print('現在地として検出中のビーコンを使用: ${startBooth.name}');
-          break;
-        }
+    // 訪問順を現在地から近い順に並び替え（混雑優先で選んだ後の順序最適化）
+    List<BeaconLocation> _orderByDistance(BeaconLocation start, List<BeaconLocation> targets) {
+      final remaining = List<BeaconLocation>.from(targets);
+      final ordered = <BeaconLocation>[];
+      var current = start;
+      while (remaining.isNotEmpty) {
+        remaining.sort((a, b) {
+          final da = (Offset(a.x, a.y) - Offset(current.x, current.y)).distance;
+          final db = (Offset(b.x, b.y) - Offset(current.x, current.y)).distance;
+          return da.compareTo(db);
+        });
+        final next = remaining.removeAt(0);
+        ordered.add(next);
+        current = next;
       }
+      return ordered;
     }
-    
-    // 検出中のビーコンがない場合はエントランスを使用
-    if (startBooth == null) {
-      startBooth = _beaconLocations.firstWhere(
-        (b) => b.type == BeaconType.entrance,
-        orElse: () => _beaconLocations.first,
-      );
-      print('現在地としてエントランスを使用: ${startBooth.name}');
-    }
-    
+
+    final orderedTargets = keepOrder ? targetBooths : _orderByDistance(startBooth, targetBooths);
+
     // ルートを計算（通路のパスファインディングを使用）
-    final routeBeacons = [startBooth, ...targetBooths];
+    final routeBeacons = [startBooth, ...orderedTargets];
     final routePath = _calculateRoutePath(routeBeacons);
     
     setState(() {
@@ -1368,16 +1582,20 @@ class _CrowdHeatmapScreenState extends State<CrowdHeatmapScreen> {
         action: SnackBarAction(
           label: 'クリア',
           onPressed: () {
-            setState(() {
-              _showingRoute = false;
-              _currentRoute = [];
-              _currentPath = [];
-            });
+            _clearRoute();
           },
         ),
         duration: const Duration(seconds: 5),
       ),
     );
+  }
+
+  void _clearRoute() {
+    setState(() {
+      _showingRoute = false;
+      _currentRoute = [];
+      _currentPath = [];
+    });
   }
   
   /// 通路に沿ったルートパスを計算
@@ -1403,11 +1621,227 @@ class _CrowdHeatmapScreenState extends State<CrowdHeatmapScreen> {
     
     return path;
   }
+
+  /// 任意の座標を最寄りの「通路」領域内に射影する
+  /// - mapElements の type / label に aisle/path/road/corridor/walk/通路 が含まれる矩形を通路とみなす
+  /// - 通路が見つからない場合は元の座標を返す
+  Offset _projectToNearestAisle(Offset original, {double margin = 4.0}) {
+    if (_mapElements.isEmpty) return original;
+
+    Offset? nearestPoint;
+    double nearestDist = double.infinity;
+
+    // 通路判定に使うラベル群（日本語含む）
+    final aisleLabels = <String>{
+      '上部通路',
+      '下部通路',
+      '右側通路',
+      '左縦通路',
+      '中央縦通路',
+      '横通路1',
+    };
+
+    for (final elem in _mapElements) {
+      final type = elem['type']?.toString().toLowerCase() ?? '';
+      final label = elem['label']?.toString().toLowerCase() ?? '';
+      final x = (elem['x'] as num?)?.toDouble() ?? 0;
+      final y = (elem['y'] as num?)?.toDouble() ?? 0;
+      final w = (elem['width'] as num?)?.toDouble() ?? 0;
+      final h = (elem['height'] as num?)?.toDouble() ?? 0;
+      if (w <= 0 || h <= 0) continue;
+
+      final isAisle = type.contains('aisle') ||
+          type.contains('path') ||
+          type.contains('road') ||
+          type.contains('corridor') ||
+          type.contains('walk') ||
+          label.contains('通路') ||
+          aisleLabels.contains(label);
+      if (!isAisle) continue;
+
+      final rect = Rect.fromLTWH(x, y, w, h);
+      // 通路領域の内側少し余裕をもってクランプ
+      final clamped = Offset(
+        original.dx.clamp(rect.left + margin, rect.right - margin),
+        original.dy.clamp(rect.top + margin, rect.bottom - margin),
+      );
+      final dist = (original - clamped).distance;
+      if (dist < nearestDist) {
+        nearestDist = dist;
+        nearestPoint = clamped;
+      }
+    }
+
+    return nearestPoint ?? original;
+  }
+
+  bool _isAisleElement(Map<String, dynamic> elem) {
+    final type = elem['type']?.toString().toLowerCase() ?? '';
+    final label = elem['label']?.toString().toLowerCase() ?? '';
+    final aisleLabels = <String>{
+      '上部通路',
+      '下部通路',
+      '右側通路',
+      '左縦通路',
+      '中央縦通路',
+      '横通路1',
+    }.map((e) => e.toLowerCase()).toSet();
+
+    return type.contains('aisle') ||
+        type.contains('path') ||
+        type.contains('road') ||
+        type.contains('corridor') ||
+        type.contains('walk') ||
+        label.contains('通路') ||
+        aisleLabels.contains(label);
+  }
+
+  bool _isBlockedElement(Map<String, dynamic> elem) {
+    final type = elem['type']?.toString().toLowerCase() ?? '';
+    final label = elem['label']?.toString().toLowerCase() ?? '';
+    // 机・ブース系をブロック
+    final isTable = type.contains('table') || label.contains('机');
+    final isBooth = type.contains('booth');
+    final isWall = type.contains('wall');
+    final isStage = type.contains('stage');
+    return isTable || isBooth || isWall || isStage;
+  }
+
+  bool _pointInBlockedArea(Offset p) {
+    for (final elem in _mapElements) {
+      if (_isAisleElement(elem)) continue;
+      if (!_isBlockedElement(elem)) continue;
+      final x = (elem['x'] as num?)?.toDouble() ?? 0;
+      final y = (elem['y'] as num?)?.toDouble() ?? 0;
+      final w = (elem['width'] as num?)?.toDouble() ?? 0;
+      final h = (elem['height'] as num?)?.toDouble() ?? 0;
+      if (w <= 0 || h <= 0) continue;
+      final rect = Rect.fromLTWH(x, y, w, h);
+      if (rect.contains(p)) return true;
+    }
+    return false;
+  }
+
+  /// 線分がブロック領域を横切るか判定（粗めのサンプリング）
+  bool _segmentBlocked(Offset a, Offset b, {int samples = 12}) {
+    if (_mapElements.isEmpty) return false;
+    for (int i = 0; i <= samples; i++) {
+      final t = i / samples;
+      final p = Offset(
+        a.dx + (b.dx - a.dx) * t,
+        a.dy + (b.dy - a.dy) * t,
+      );
+      if (_pointInBlockedArea(p)) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /// 通路矩形から簡易グラフを作成
+  List<_AisleNode> _buildAisleNodes() {
+    if (_mapElements.isEmpty) return [];
+    final nodes = <_AisleNode>[];
+    for (final elem in _mapElements) {
+      if (!_isAisleElement(elem)) continue;
+      final x = (elem['x'] as num?)?.toDouble() ?? 0;
+      final y = (elem['y'] as num?)?.toDouble() ?? 0;
+      final w = (elem['width'] as num?)?.toDouble() ?? 0;
+      final h = (elem['height'] as num?)?.toDouble() ?? 0;
+      if (w <= 0 || h <= 0) continue;
+      nodes.add(_AisleNode(elem['id']?.toString() ?? UniqueKey().toString(), Rect.fromLTWH(x, y, w, h)));
+    }
+    return nodes;
+  }
+
+  Map<String, List<String>> _buildAisleEdges(List<_AisleNode> nodes) {
+    final edges = <String, List<String>>{};
+    const gap = 200.0; // さらに広げて確実に接続
+    for (int i = 0; i < nodes.length; i++) {
+      for (int j = i + 1; j < nodes.length; j++) {
+        final a = nodes[i];
+        final b = nodes[j];
+        // 矩形が接する/重なる/距離が近い場合につなぐ
+        final expandedA = a.rect.inflate(gap);
+        final expandedB = b.rect.inflate(gap);
+        if (expandedA.overlaps(expandedB)) {
+          edges.putIfAbsent(a.id, () => []).add(b.id);
+          edges.putIfAbsent(b.id, () => []).add(a.id);
+        }
+      }
+    }
+    return edges;
+  }
+
+  /// 簡易グラフでA*（矩形中心をノードに）
+  List<Offset> _aStarOnAisles(Offset start, Offset goal) {
+    final nodes = _buildAisleNodes();
+    if (nodes.length < 2) return [];
+    final edges = _buildAisleEdges(nodes);
+
+    // 最寄りノード
+    _AisleNode? nearest(Offset p) {
+      double d = double.infinity;
+      _AisleNode? n;
+      for (final node in nodes) {
+        final dist = (node.center - p).distance;
+        if (dist < d) {
+          d = dist;
+          n = node;
+        }
+      }
+      return n;
+    }
+
+    final startNode = nearest(start);
+    final goalNode = nearest(goal);
+    if (startNode == null || goalNode == null) return [];
+    if (startNode.id == goalNode.id) {
+      // 同一通路矩形内ならそのまま直結
+      return [start, goal];
+    }
+
+    final open = <_AisleNode>[startNode];
+    final came = <String, _AisleNode>{};
+    final g = <String, double>{startNode.id: 0};
+    final f = <String, double>{startNode.id: startNode.distanceTo(goalNode)};
+
+    while (open.isNotEmpty) {
+      open.sort((a, b) => (f[a.id] ?? double.infinity).compareTo(f[b.id] ?? double.infinity));
+      final current = open.removeAt(0);
+      if (current.id == goalNode.id) {
+        // reconstruct
+        final path = <Offset>[goal];
+        var c = current;
+        while (came.containsKey(c.id)) {
+          path.insert(0, c.center);
+          c = came[c.id]!;
+        }
+        path.insert(0, start);
+        return path;
+      }
+      for (final nid in edges[current.id] ?? []) {
+        final neighbor = nodes.firstWhere((n) => n.id == nid);
+        // 通路同士なのでブロック判定はスキップ
+        final tentative = (g[current.id] ?? double.infinity) + current.distanceTo(neighbor);
+        if (tentative < (g[neighbor.id] ?? double.infinity)) {
+          came[neighbor.id] = current;
+          g[neighbor.id] = tentative;
+          f[neighbor.id] = tentative + neighbor.distanceTo(goalNode);
+          if (!open.contains(neighbor)) open.add(neighbor);
+        }
+      }
+    }
+    return [];
+  }
   
   /// 2つのビーコン間のパスを探索（A*アルゴリズム）
   List<Offset> _findPathBetweenBeacons(BeaconLocation start, BeaconLocation end) {
     final startPos = Offset(start.x, start.y);
     final endPos = Offset(end.x, end.y);
+    // ブース中心から最寄り通路へスナップ（机を突き抜けないようにする）
+    final startAnchor = _projectToNearestAisle(startPos);
+    final endAnchor = _projectToNearestAisle(endPos);
     
     // 開始位置と終了位置に最も近い通路ノードを見つける
     PathNode? startNode;
@@ -1416,13 +1850,13 @@ class _CrowdHeatmapScreenState extends State<CrowdHeatmapScreen> {
     double minEndDist = double.infinity;
     
     for (final node in _pathNodes) {
-      final startDist = (node.position - startPos).distance;
+      final startDist = (node.position - startAnchor).distance;
       if (startDist < minStartDist) {
         minStartDist = startDist;
         startNode = node;
       }
       
-      final endDist = (node.position - endPos).distance;
+      final endDist = (node.position - endAnchor).distance;
       if (endDist < minEndDist) {
         minEndDist = endDist;
         endNode = node;
@@ -1430,8 +1864,11 @@ class _CrowdHeatmapScreenState extends State<CrowdHeatmapScreen> {
     }
     
     if (startNode == null || endNode == null) {
-      // フォールバック: 直線パス
-      return [startPos, endPos];
+      // フォールバック: aisle矩形グラフ → 直線（直線がブロックなら空）
+      final aislePath = _aStarOnAisles(startAnchor, endAnchor);
+      if (aislePath.isNotEmpty) return aislePath;
+      if (_segmentBlocked(startAnchor, endAnchor)) return [];
+      return [startAnchor, endAnchor];
     }
     
     // A*アルゴリズムでパスを探索
@@ -1454,13 +1891,17 @@ class _CrowdHeatmapScreenState extends State<CrowdHeatmapScreen> {
       
       // ゴールに到達
       if (current.id == endNode.id) {
-        return _reconstructPath(cameFrom, current, startPos, endPos);
+        return _reconstructPath(cameFrom, current, startAnchor, endAnchor);
       }
       
       // 隣接ノードを探索
       final neighbors = _pathConnections[current.id] ?? [];
       for (final neighborId in neighbors) {
         final neighbor = _pathNodes.firstWhere((n) => n.id == neighborId);
+        // 通路外や机上を横切る場合はスキップ
+        if (_segmentBlocked(current.position, neighbor.position)) {
+          continue;
+        }
         final tentativeGScore = (gScore[current.id] ?? double.infinity) + 
                                 current.distanceTo(neighbor);
         
@@ -1476,8 +1917,11 @@ class _CrowdHeatmapScreenState extends State<CrowdHeatmapScreen> {
       }
     }
     
-    // パスが見つからない場合は直線パス
-    return [startPos, endPos];
+    // パスが見つからない場合は aisle グラフを試す
+    final aislePath = _aStarOnAisles(startAnchor, endAnchor);
+    if (aislePath.isNotEmpty) return aislePath;
+    if (_segmentBlocked(startAnchor, endAnchor)) return [];
+    return [startAnchor, endAnchor];
   }
   
   /// パスを再構築
@@ -1512,13 +1956,93 @@ class _CrowdHeatmapScreenState extends State<CrowdHeatmapScreen> {
     });
   }
 
+  Future<void> _showOptimalRouteForBookmarks() async {
+    if (_bookmarkedBoothIds.isEmpty) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('お気に入りがありません。ブースを☆登録してください。')),
+        );
+      }
+      return;
+    }
+
+    // 現在地（計算用）
+    BeaconLocation? startBooth;
+    if (_detectedBeacons.isNotEmpty) {
+      for (final beaconName in _detectedBeacons.keys) {
+        final detectedBooth = _beaconLocations.firstWhere(
+          (b) => b.id == beaconName,
+          orElse: () => _beaconLocations.first,
+        );
+        if (detectedBooth.id == beaconName) {
+          startBooth = detectedBooth;
+          break;
+        }
+      }
+    }
+    if (startBooth == null) {
+      startBooth = _beaconLocations.firstWhere(
+        (b) => b.type == BeaconType.entrance,
+        orElse: () => _beaconLocations.first,
+      );
+    }
+
+    try {
+      final result = await _firebaseService.computeOptimalRoute(
+        targetBoothIds: _bookmarkedBoothIds.toList(),
+        currentPosition: {'x': startBooth.x, 'y': startBooth.y},
+      );
+      final orderIds = (result['order'] as List?)?.whereType<String>().toList() ?? [];
+      if (orderIds.isEmpty) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('座標が取得できるブースがありませんでした')),
+          );
+        }
+        return;
+      }
+      final orderedBooths = <BeaconLocation>[];
+      for (final id in orderIds) {
+        final b = _beaconLocations.firstWhere(
+          (booth) => booth.id == id,
+          orElse: () => _beaconLocations.first,
+        );
+        if (b.id == id) {
+          orderedBooths.add(b);
+        }
+      }
+      if (orderedBooths.isEmpty) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('ルートに使用できるブースがありませんでした')),
+          );
+        }
+        return;
+      }
+      _showRouteToBooths(orderedBooths);
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('最短ルートを生成しました（${orderIds.length}件）')),
+        );
+      }
+    } catch (e) {
+      print('最適ルート計算エラー: $e');
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('最適ルートの計算に失敗しました: $e')),
+        );
+      }
+    }
+  }
+
   /// 混雑度をチェック
   void _checkCrowdingLevels() {
     final newAlerts = <String, bool>{};
     
     for (final beacon in _beaconLocations) {
       if (beacon.type == BeaconType.booth) {
-        final count = _todayStats[beacon.id]?['count'] ?? 0;
+                          // リアルタイム: 現在検出中のユーザー数
+                          final count = _activeUsers[beacon.id]?.length ?? 0;
         final isCrowded = count >= _crowdingThreshold;
         
         newAlerts[beacon.id] = isCrowded;
@@ -2019,52 +2543,14 @@ class _CrowdHeatmapScreenState extends State<CrowdHeatmapScreen> {
           ),
           PopupMenuButton<String>(
             onSelected: (value) async {
-              if (value == 'generate') {
-                await _generateTestData();
-              } else if (value == 'clear') {
-                await _clearTestData();
-              } else if (value == 'refresh') {
+              if (value == 'refresh') {
                 await _loadCrowdData();
-              } else if (value == 'debug') {
-                await _debugFirebaseData();
-              } else if (value == 'load_specific') {
-                await _loadSpecificDate();
-              } else if (value == 'init_booths') {
-                await _initializeBoothData();
-              } else if (value == 'init_map_layout') {
-                await _initializeMapLayout();
-              } else if (value == 'init_booth_sizes') {
-                await _initializeBoothSizes();
-              } else if (value == 'set_custom_booth_sizes') {
-                await _setCustomBoothSizes();
-              } else if (value == 'init_classroom') {
-                await _initializeClassroom();
-              } else if (value == 'setup_classroom_booths') {
-                await _setupClassroomBooths();
+              } else if (value == 'staff') {
+                Navigator.of(context).pushNamed('/staff');
               }
             },
-            itemBuilder: (context) => [
-              const PopupMenuItem(
-                value: 'generate',
-                child: Row(
-                  children: [
-                    Icon(Icons.data_usage),
-                    SizedBox(width: 8),
-                    Text('テストデータ生成'),
-                  ],
-                ),
-              ),
-              const PopupMenuItem(
-                value: 'clear',
-                child: Row(
-                  children: [
-                    Icon(Icons.clear_all),
-                    SizedBox(width: 8),
-                    Text('テストデータクリア'),
-                  ],
-                ),
-              ),
-              const PopupMenuItem(
+            itemBuilder: (context) => const [
+              PopupMenuItem(
                 value: 'refresh',
                 child: Row(
                   children: [
@@ -2074,83 +2560,13 @@ class _CrowdHeatmapScreenState extends State<CrowdHeatmapScreen> {
                   ],
                 ),
               ),
-              const PopupMenuItem(
-                value: 'debug',
+              PopupMenuItem(
+                value: 'staff',
                 child: Row(
                   children: [
-                    Icon(Icons.bug_report),
+                    Icon(Icons.support_agent),
                     SizedBox(width: 8),
-                    Text('Firebaseデバッグ'),
-                  ],
-                ),
-              ),
-              const PopupMenuItem(
-                value: 'load_specific',
-                child: Row(
-                  children: [
-                    Icon(Icons.calendar_today),
-                    SizedBox(width: 8),
-                    Text('2025-08-05データ取得'),
-                  ],
-                ),
-              ),
-              const PopupMenuItem(
-                value: 'init_booths',
-                child: Row(
-                  children: [
-                    Icon(Icons.store),
-                    SizedBox(width: 8),
-                    Text('ブース情報初期化'),
-                  ],
-                ),
-              ),
-              const PopupMenuItem(
-                value: 'init_map_layout',
-                child: Row(
-                  children: [
-                    Icon(Icons.map),
-                    SizedBox(width: 8),
-                    Text('マップレイアウト初期化'),
-                  ],
-                ),
-              ),
-              const PopupMenuItem(
-                value: 'init_booth_sizes',
-                child: Row(
-                  children: [
-                    Icon(Icons.aspect_ratio),
-                    SizedBox(width: 8),
-                    Text('ブースサイズ初期化'),
-                  ],
-                ),
-              ),
-              const PopupMenuItem(
-                value: 'set_custom_booth_sizes',
-                child: Row(
-                  children: [
-                    Icon(Icons.auto_fix_high),
-                    SizedBox(width: 8),
-                    Text('カスタムブースサイズ設定'),
-                  ],
-                ),
-              ),
-              const PopupMenuItem(
-                value: 'init_classroom',
-                child: Row(
-                  children: [
-                    Icon(Icons.school),
-                    SizedBox(width: 8),
-                    Text('教室レイアウトに変更'),
-                  ],
-                ),
-              ),
-              const PopupMenuItem(
-                value: 'setup_classroom_booths',
-                child: Row(
-                  children: [
-                    Icon(Icons.table_chart),
-                    SizedBox(width: 8),
-                    Text('教室ブース座標設定'),
+                    Text('スタッフ画面'),
                   ],
                 ),
               ),
@@ -2329,7 +2745,7 @@ class _CrowdHeatmapScreenState extends State<CrowdHeatmapScreen> {
                                           }
                                         },
                                         child: CustomPaint(
-                                          key: ValueKey('${_todayStats.hashCode}_${_activeUsers.hashCode}'), // 強制再描画用のKey（activeUsersの変更も反映）
+                                          key: ValueKey('${_todayStats.hashCode}_${_activeUsers.hashCode}_${_realtimeStats.hashCode}'), // 強制再描画用のKey（activeUsersとrealtimeStatsの変更も反映）
                                           painter: VenuePainter(
                                             _beaconLocations, 
                                             _todayStats, 
@@ -2337,7 +2753,8 @@ class _CrowdHeatmapScreenState extends State<CrowdHeatmapScreen> {
                                             routeBeacons: _currentRoute,
                                             routePath: _currentPath,
                                             mapElements: _mapElements,
-                                            activeUsers: _activeUsers, // リアルタイムのアクティブユーザー数を渡す
+                                            activeUsers: _activeUsers, // ローカルのアクティブユーザー数
+                                            realtimeStats: _realtimeStats, // Firebaseのリアルタイム統計（他のデバイスを含む）
                                           ),
                                           size: Size(
                                             _eventLayout?['mapWidth']?.toDouble() ?? 380, // 動的に幅を設定
@@ -2408,6 +2825,22 @@ class _CrowdHeatmapScreenState extends State<CrowdHeatmapScreen> {
                                           ],
                                         ),
                                       ),
+                                    ),
+                                  ),
+                                if (_showingRoute)
+                                  Positioned(
+                                    right: 12,
+                                    bottom: 12,
+                                    child: ElevatedButton.icon(
+                                      style: ElevatedButton.styleFrom(
+                                        backgroundColor: Colors.white,
+                                        foregroundColor: Colors.black87,
+                                        elevation: 3,
+                                        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                                      ),
+                                      onPressed: _clearRoute,
+                                      icon: const Icon(Icons.close),
+                                      label: const Text('ルートを非表示'),
                                     ),
                                   ),
                                     ],
@@ -2708,6 +3141,16 @@ class PathNode {
   }
 }
 
+/// 通路矩形を簡易ノードにしてA*するための補助クラス（トップレベル）
+class _AisleNode {
+  final String id;
+  final Rect rect;
+  final Offset center;
+  _AisleNode(this.id, this.rect) : center = rect.center;
+
+  double distanceTo(_AisleNode other) => (center - other.center).distance;
+}
+
 // ビーコンの位置情報を管理するクラス
 class BeaconLocation {
   final String id;
@@ -2770,7 +3213,8 @@ class VenuePainter extends CustomPainter {
   final List<BeaconLocation> routeBeacons;
   final List<Offset> routePath; // 通路に沿った実際の経路
   final List<Map<String, dynamic>> mapElements; // マップ要素（Firebaseから取得）
-  final Map<String, Set<String>> activeUsers; // リアルタイムのアクティブユーザー
+  final Map<String, Set<String>> activeUsers; // リアルタイムのアクティブユーザー（ローカル）
+  final Map<String, dynamic> realtimeStats; // Firebaseのリアルタイム統計（他のデバイスを含む）
 
   VenuePainter(
     this.beacons, 
@@ -2780,6 +3224,7 @@ class VenuePainter extends CustomPainter {
     this.routePath = const [],
     this.mapElements = const [],
     this.activeUsers = const {},
+    this.realtimeStats = const {},
   });
 
   @override
@@ -2799,9 +3244,12 @@ class VenuePainter extends CustomPainter {
     for (final beacon in beacons) {
       final beaconData = crowdData[beacon.id];
       
-      // 🚀 リアルタイムのアクティブユーザー数を使用
-      // Firebaseの累積カウントではなく、現在検出中のユーザー数を表示
-      int count = activeUsers[beacon.id]?.length ?? 0;
+      // 🚀 リアルタイムのアクティブユーザー数を統合
+      // ローカルのactiveUsersとFirebaseのリアルタイム統計を統合して表示
+      final localCount = activeUsers[beacon.id]?.length ?? 0;
+      final firebaseCount = realtimeStats[beacon.id]?['count'] ?? 0;
+      // ローカルとFirebaseの最大値を使用（他のデバイスも含めたリアルタイムカウント）
+      int count = math.max(localCount, firebaseCount);
 
       final crowdColor = _getCrowdColor(count);
       
@@ -2867,14 +3315,18 @@ class VenuePainter extends CustomPainter {
   void _drawRoute(Canvas canvas, Size size) {
     if (routePath.length < 2 || routeBeacons.isEmpty) return;
     
+    // ブース領域を避けた通路セグメントを構築
+    final safeSegments = _buildAisleSegments();
+    if (safeSegments.isEmpty) return;
+    
     // まず通路のハイライトを描画（背景）
-    _drawPathHighlight(canvas);
+    _drawPathHighlight(canvas, safeSegments);
     
     // メインルート線を描画（前景）
-    _drawMainRouteLine(canvas);
+    _drawMainRouteLine(canvas, safeSegments);
     
     // 矢印を描画（通路の途中のポイントに）
-    _drawRouteArrows(canvas);
+    _drawRouteArrows(canvas, safeSegments);
     
     // ルート番号を描画（ビーコンの位置に）
     for (int i = 0; i < routeBeacons.length; i++) {
@@ -2884,8 +3336,8 @@ class VenuePainter extends CustomPainter {
   }
 
   /// メインルート線を描画（より目立つスタイル）
-  void _drawMainRouteLine(Canvas canvas) {
-    if (routePath.length < 2) return;
+  void _drawMainRouteLine(Canvas canvas, List<List<Offset>> segments) {
+    if (segments.isEmpty) return;
     
     // 外側の白いアウトライン
     final outlinePaint = Paint()
@@ -2904,21 +3356,31 @@ class VenuePainter extends CustomPainter {
       ..strokeJoin = StrokeJoin.round;
     
     final path = Path();
-    path.moveTo(routePath.first.dx, routePath.first.dy);
-    
-    for (int i = 1; i < routePath.length; i++) {
-      path.lineTo(routePath[i].dx, routePath[i].dy);
+    bool hasMove = false;
+    for (final seg in segments) {
+      if (seg.length < 2) continue;
+      if (!hasMove) {
+        path.moveTo(seg.first.dx, seg.first.dy);
+        hasMove = true;
+      } else {
+        path.moveTo(seg.first.dx, seg.first.dy);
+      }
+      for (int i = 1; i < seg.length; i++) {
+        path.lineTo(seg[i].dx, seg[i].dy);
+      }
     }
     
-    // 先にアウトラインを描画
-    canvas.drawPath(path, outlinePaint);
-    // その後メインライン描画
-    canvas.drawPath(path, mainPaint);
+    if (hasMove) {
+      // 先にアウトラインを描画
+      canvas.drawPath(path, outlinePaint);
+      // その後メインライン描画
+      canvas.drawPath(path, mainPaint);
+    }
   }
 
   /// 通路経路のハイライトを描画（より薄く）
-  void _drawPathHighlight(Canvas canvas) {
-    if (routePath.length < 2) return;
+  void _drawPathHighlight(Canvas canvas, List<List<Offset>> segments) {
+    if (segments.isEmpty) return;
     
     final paint = Paint()
       ..color = Colors.blue.shade200.withOpacity(0.3)  // より薄いハイライト
@@ -2927,32 +3389,36 @@ class VenuePainter extends CustomPainter {
       ..strokeCap = StrokeCap.round;
     
     // 通路のハイライトを描画
-    for (int i = 0; i < routePath.length - 1; i++) {
-      canvas.drawLine(routePath[i], routePath[i + 1], paint);
+    for (final seg in segments) {
+      for (int i = 0; i < seg.length - 1; i++) {
+        canvas.drawLine(seg[i], seg[i + 1], paint);
+      }
     }
   }
 
   /// 通路経路に矢印を描画（より目立つ）
-  void _drawRouteArrows(Canvas canvas) {
-    if (routePath.length < 2) return;
+  void _drawRouteArrows(Canvas canvas, List<List<Offset>> segments) {
+    if (segments.isEmpty) return;
     
     // 経路の一定間隔で矢印を描画
     const arrowInterval = 80.0; // 間隔を少し広げる
     
-    for (int i = 0; i < routePath.length - 1; i++) {
-      final start = routePath[i];
-      final end = routePath[i + 1];
-      final segmentDistance = (end - start).distance;
-      
-      // セグメント内で矢印を配置
-      int arrowCount = math.max(1, (segmentDistance / arrowInterval).floor());
-      for (int j = 1; j <= arrowCount; j++) {
-        final t = j / (arrowCount + 1);
-        final arrowPos = start + (end - start) * t;
-        final direction = end - start;
+    for (final seg in segments) {
+      for (int i = 0; i < seg.length - 1; i++) {
+        final start = seg[i];
+        final end = seg[i + 1];
+        final segmentDistance = (end - start).distance;
         
-        if (direction.distance > 30) { // より長いセグメントのみに描画
-          _drawPathArrow(canvas, arrowPos, direction);
+        // セグメント内で矢印を配置
+        int arrowCount = math.max(1, (segmentDistance / arrowInterval).floor());
+        for (int j = 1; j <= arrowCount; j++) {
+          final t = j / (arrowCount + 1);
+          final arrowPos = start + (end - start) * t;
+          final direction = end - start;
+          
+          if (direction.distance > 30) { // より長いセグメントのみに描画
+            _drawPathArrow(canvas, arrowPos, direction);
+          }
         }
       }
     }
@@ -3236,5 +3702,84 @@ class VenuePainter extends CustomPainter {
   @override
   bool shouldRepaint(CustomPainter oldDelegate) {
     return true;
+  }
+
+  /// ブースや机などの上には描かず、mapElementsで「通路」とみなす要素上のみを通す
+  List<List<Offset>> _buildAisleSegments() {
+    // mapElementsがなければそのまま
+    if (mapElements.isEmpty || routePath.length < 2) {
+      return [routePath];
+    }
+
+    bool _isBlocked(Offset p) {
+      for (final elem in mapElements) {
+        final type = elem['type']?.toString().toLowerCase() ?? '';
+        final label = elem['label']?.toString().toLowerCase() ?? '';
+        final x = (elem['x'] as num?)?.toDouble() ?? 0;
+        final y = (elem['y'] as num?)?.toDouble() ?? 0;
+        final w = (elem['width'] as num?)?.toDouble() ?? 0;
+        final h = (elem['height'] as num?)?.toDouble() ?? 0;
+        if (w <= 0 || h <= 0) continue;
+        final rect = Rect.fromLTWH(x, y, w, h);
+        if (!rect.contains(p)) continue;
+
+        // 通路扱い: type/label に "aisle" "path" "road" "corridor" "walk" "通路" が含まれる場合は通してOK
+        final isAisle = type.contains('aisle') ||
+            type.contains('path') ||
+            type.contains('road') ||
+            type.contains('corridor') ||
+            type.contains('walk') ||
+            label.contains('通路');
+        if (isAisle) {
+          return false; // blockedではない
+        }
+
+        // 机/ブースなどはブロック
+        final isTable = type.contains('table') || label.contains('机');
+        final isBooth = type.contains('booth');
+        final isWall = type.contains('wall');
+        final isStage = type.contains('stage');
+        if (isTable || isBooth || isWall || isStage || !isAisle) {
+          return true;
+        }
+      }
+      return false; // どの要素にも含まれない → ブロックしない
+    }
+
+    final segments = <List<Offset>>[];
+    List<Offset> current = [];
+
+    void flush() {
+      if (current.length >= 2) {
+        segments.add(List<Offset>.from(current));
+      }
+      current = [];
+    }
+
+    // アンカー（開始・終了）は強制的に含める
+    current.add(routePath.first);
+    for (int i = 1; i < routePath.length; i++) {
+      final prev = routePath[i - 1];
+      final next = routePath[i];
+      final isPrevBlocked = _isBlocked(prev);
+      final isNextBlocked = _isBlocked(next);
+
+      // 両端がブロック領域内なら分割（ただし最後は残す）
+      if (isPrevBlocked && isNextBlocked && i != routePath.length - 1) {
+        flush();
+        continue;
+      }
+      // 終点も強制的に含める
+      current.add(next);
+    }
+    flush();
+
+    // 有効セグメントのみ返す
+    final filtered = segments.where((s) => s.length >= 2).toList();
+    // すべて消えてしまう場合はフォールバックで元のルートを返す
+    if (filtered.isEmpty) {
+      return [routePath];
+    }
+    return filtered;
   }
 } 
