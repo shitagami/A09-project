@@ -142,11 +142,8 @@ class _OrganizerScreenState extends State<OrganizerScreen> with TickerProviderSt
   }
 
   int _getTotalCount() {
-    int total = 0;
-    for (final data in _todayStats.values) {
-      total += (data['count'] as int? ?? 0);
-    }
-    return total;
+    // 総来場者数で表示（リアルタイム人数ではなく累計ユニーク）
+    return _visitorData.length;
   }
 
   int _getTotalVisitors() {
@@ -351,23 +348,6 @@ class _OrganizerScreenState extends State<OrganizerScreen> with TickerProviderSt
                   ),
                 ),
                 const SizedBox(width: 24),
-                Expanded(
-                  flex: 2,
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      const Text(
-                        'ビーコン別受信統計',
-                        style: TextStyle(
-                          fontSize: 20,
-                          fontWeight: FontWeight.bold,
-                        ),
-                      ),
-                      const SizedBox(height: 16),
-                      _buildBeaconList(totalCount),
-                    ],
-                  ),
-                ),
               ],
             )
           else
@@ -406,16 +386,6 @@ class _OrganizerScreenState extends State<OrganizerScreen> with TickerProviderSt
                     ),
                   ),
                 ),
-                const SizedBox(height: 24),
-                const Text(
-                  'ビーコン別受信統計',
-                  style: TextStyle(
-                    fontSize: 20,
-                    fontWeight: FontWeight.bold,
-                  ),
-                ),
-                const SizedBox(height: 16),
-                Expanded(child: _buildBeaconList(totalCount)),
               ],
             ),
         ],
@@ -423,67 +393,9 @@ class _OrganizerScreenState extends State<OrganizerScreen> with TickerProviderSt
     );
   }
 
+  // ビーコン別統計は非表示（将来用の空実装）
   Widget _buildBeaconList(int totalCount) {
-    if (_todayStats.isEmpty) {
-      return const Card(
-        child: Padding(
-          padding: EdgeInsets.all(16.0),
-          child: Text(
-            '今日の統計データはありません',
-            style: TextStyle(fontSize: 16, color: Colors.grey),
-          ),
-        ),
-      );
-    }
-
-    return ListView.builder(
-      shrinkWrap: true,
-      physics: const NeverScrollableScrollPhysics(),
-      itemCount: _todayStats.length,
-      itemBuilder: (context, index) {
-        final deviceName = _todayStats.keys.elementAt(index);
-        final data = _todayStats[deviceName] as Map<String, dynamic>;
-        final count = data['count'] ?? 0;
-        
-        return Card(
-          child: ListTile(
-            leading: const Icon(Icons.bluetooth, color: Colors.purple),
-            title: Text(deviceName),
-            subtitle: Text('受信回数: $count回'),
-            trailing: Row(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Text(
-                  '${totalCount > 0 ? ((count / totalCount) * 100).toStringAsFixed(1) : '0'}%',
-                  style: const TextStyle(
-                    color: Colors.grey,
-                    fontSize: 12,
-                  ),
-                ),
-                const SizedBox(width: 8),
-                Container(
-                  padding: const EdgeInsets.symmetric(
-                    horizontal: 12,
-                    vertical: 6,
-                  ),
-                  decoration: BoxDecoration(
-                    color: Colors.purple,
-                    borderRadius: BorderRadius.circular(20),
-                  ),
-                  child: Text(
-                    count.toString(),
-                    style: const TextStyle(
-                      color: Colors.white,
-                      fontWeight: FontWeight.bold,
-                    ),
-                  ),
-                ),
-              ],
-            ),
-          ),
-        );
-      },
-    );
+    return const SizedBox.shrink();
   }
 
   Widget _buildAttributeTab(int totalVisitors, Map<String, int> genderData, Map<String, int> ageData, bool isWideScreen) {

@@ -1418,12 +1418,14 @@ class FirebaseService {
         final byBoothCounts = (u['boothVisitEvents'] as Map<String, int>);
         final totalTime = (u['totalTime'] as int);
         
-        final hasRevisit = byBoothCounts.values.any((c) => c >= 2) && totalTime >= 1; // visitイベントが2回以上かつ1分以上滞在
-        final hasLongStay = totalTime >= 5;
+        final bool hasLongStayEvent = visits.any((e) => e['eventType'] == 'long_stay');
+        // 再訪問 + 5分以上滞在（またはlong_stayイベント）の両方を満たす場合のみ見込み客
+        final hasRevisit = byBoothCounts.values.any((c) => c >= 2);
+        final hasLongStay = totalTime >= 5 || hasLongStayEvent;
         
         print('ユーザー ${u['userId']}: 再訪問=$hasRevisit, 長時間滞在=$hasLongStay, 総時間=${totalTime}分');
         
-        if (hasRevisit || hasLongStay) {
+        if (hasRevisit && hasLongStay) {
           final visitorInfo = await _getVisitorInfo(u['userId']);
           if (visitorInfo != null) {
             final int visitEventCount = visits.where((e) => e['eventType'] == 'visit').length;
@@ -1469,7 +1471,7 @@ class FirebaseService {
   }
 
   /// 全来場者リストを取得（見込み客条件に関係なく）
-  Future<List<Map<String, dynamic>>> getAllVisitors() async {
+  Future<List<Map<String, dynamic>>> getAllVisitors({String? targetBoothId}) async {
     try {
       print('=== 全来場者リストの取得開始 ===');
       
@@ -1563,23 +1565,35 @@ class FirebaseService {
         final visits = (u['visits'] as List<Map<String, dynamic>>);
         final byBoothCounts = (u['boothVisitEvents'] as Map<String, int>);
         final totalTime = (u['totalTime'] as int);
-        
-        final hasRevisit = byBoothCounts.values.any((c) => c >= 2) && totalTime >= 1; // visitイベントが2回以上かつ1分以上滞在
-        final hasLongStay = totalTime >= 5;
+        // 対象ブースのみで再訪/長滞を判定（指定なしの場合は従来通り全ブース）
+        final int targetVisitCount = targetBoothId != null
+            ? (byBoothCounts[targetBoothId] ?? 0)
+            : byBoothCounts.values.fold(0, (p, e) => p + e);
+        final bool hasLongStayEvent = visits.any((e) => e['eventType'] == 'long_stay');
+        final bool hasRevisit = targetBoothId != null
+            ? targetVisitCount >= 2
+            : byBoothCounts.values.any((c) => c >= 2);
+        final hasLongStay = totalTime >= 5 || hasLongStayEvent;
         
         final visitorInfo = await _getVisitorInfo(u['userId']);
         if (visitorInfo != null) {
           final int visitEventCount = visits.where((e) => e['eventType'] == 'visit').length;
+          final int targetVisitEventCount = targetBoothId != null
+              ? visits.where((e) => e['eventType'] == 'visit' && e['boothId'] == targetBoothId).length
+              : visitEventCount;
           visitorList.add({
             ...visitorInfo,
             'totalTime': totalTime,
             'visitCount': visitEventCount,
-            'revisitCount': byBoothCounts.values.where((c) => c >= 2).length,
+            'revisitCount': targetBoothId != null
+                ? ((targetVisitCount >= 2) ? 1 : 0)
+                : byBoothCounts.values.where((c) => c >= 2).length,
             'boothVisits': byBoothCounts.keys.toList(),
             'lastVisit': visits.isNotEmpty ? visits.last['timestamp'] : null,
             'hasLongStay': hasLongStay,
             'hasRevisit': hasRevisit,
-            'isProspect': hasRevisit || (hasLongStay && visitEventCount >= 2), // 見込み客かどうかのフラグ
+            // 見込み客: 同一ブースで再訪 + 5分以上滞在
+            'isProspect': hasRevisit && hasLongStay,
           });
         }
       }

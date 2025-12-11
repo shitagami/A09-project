@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import '../services/auth_service.dart';
 import '../services/firebase_service.dart';
+import 'visitor_management_screen.dart';
 
 class ExhibitorScreen extends StatefulWidget {
   const ExhibitorScreen({super.key});
@@ -14,6 +15,7 @@ class _ExhibitorScreenState extends State<ExhibitorScreen>
   final AuthService _authService = AuthService();
   final FirebaseService _firebaseService = FirebaseService();
   Map<String, dynamic> _todayStats = {};
+  List<Map<String, dynamic>> _visitors = [];
   bool _isLoading = false;
   String _userName = '';
   late TabController _tabController;
@@ -45,10 +47,13 @@ class _ExhibitorScreenState extends State<ExhibitorScreen>
     try {
       final userName = await _authService.getUserName();
       final stats = await _firebaseService.getTodayStats();
+      // 出展ブース（FSC-BP104D）におけるユニーク来場者
+      final visitors = await _firebaseService.getAllVisitors(targetBoothId: 'FSC-BP104D');
       
       setState(() {
         _userName = userName;
         _todayStats = stats;
+        _visitors = visitors;
         _isLoading = false;
       });
     } catch (e) {
@@ -65,11 +70,8 @@ class _ExhibitorScreenState extends State<ExhibitorScreen>
   }
 
   int _getTotalCount() {
-    int total = 0;
-    for (final data in _todayStats.values) {
-      total += (data['count'] as int? ?? 0);
-    }
-    return total;
+    // 出展ブース（FSC-BP104D）のユニーク来場者数を表示
+    return _visitors.length;
   }
 
   @override
@@ -275,7 +277,15 @@ class _ExhibitorScreenState extends State<ExhibitorScreen>
                 iconColor: Colors.blue,
                 title: '来場者管理',
                 subtitle: '見込み客リストを確認',
-                onTap: () => Navigator.of(context).pushNamed('/visitor_management'),
+                onTap: () {
+                  Navigator.of(context).push(
+                    MaterialPageRoute(
+                      builder: (_) => VisitorManagementScreen(
+                        targetBoothId: 'FSC-BP104D',
+                      ),
+                    ),
+                  );
+                },
               ),
               _buildActionCard(
                 icon: Icons.store,
@@ -298,104 +308,7 @@ class _ExhibitorScreenState extends State<ExhibitorScreen>
             ],
           ),
           const SizedBox(height: 24),
-          const Text(
-            '今日のビーコン受信統計',
-            style: TextStyle(
-              fontSize: 20,
-              fontWeight: FontWeight.bold,
-            ),
-          ),
-          const SizedBox(height: 16),
-          if (_todayStats.isEmpty)
-            const Card(
-              child: Padding(
-                padding: EdgeInsets.all(16.0),
-                child: Text(
-                  '今日の統計データはありません',
-                  style: TextStyle(fontSize: 16, color: Colors.grey),
-                ),
-              ),
-            )
-          else
-            GridView.builder(
-              shrinkWrap: true,
-              physics: const NeverScrollableScrollPhysics(),
-              gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
-                crossAxisCount: isWideScreen ? 3 : 1,
-                crossAxisSpacing: 12,
-                mainAxisSpacing: 12,
-                childAspectRatio: isWideScreen ? 2.5 : 3.2,
-              ),
-              itemCount: _todayStats.length,
-              itemBuilder: (context, index) {
-                final deviceName = _todayStats.keys.elementAt(index);
-                final data = _todayStats[deviceName] as Map<String, dynamic>;
-                final count = data['count'] ?? 0;
-                final percentage = totalCount > 0
-                    ? ((count / totalCount) * 100).toStringAsFixed(1)
-                    : '0.0';
-
-                return Card(
-                  elevation: 2,
-                  child: Padding(
-                    padding: const EdgeInsets.all(16.0),
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                      children: [
-                        Row(
-                          children: [
-                            const Icon(Icons.bluetooth, color: Colors.blue),
-                            const SizedBox(width: 8),
-                            Expanded(
-                              child: Text(
-                                deviceName,
-                                style: const TextStyle(
-                                  fontSize: 16,
-                                  fontWeight: FontWeight.bold,
-                                ),
-                                overflow: TextOverflow.ellipsis,
-                              ),
-                            ),
-                          ],
-                        ),
-                        Row(
-                          mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                          children: [
-                            Text(
-                              '$count回',
-                              style: const TextStyle(
-                                fontSize: 24,
-                                fontWeight: FontWeight.bold,
-                                color: Colors.blue,
-                              ),
-                            ),
-                            Container(
-                              padding: const EdgeInsets.symmetric(
-                                horizontal: 12,
-                                vertical: 6,
-                              ),
-                              decoration: BoxDecoration(
-                                color: Colors.blue.shade50,
-                                borderRadius: BorderRadius.circular(12),
-                              ),
-                              child: Text(
-                                '$percentage%',
-                                style: const TextStyle(
-                                  color: Colors.blue,
-                                  fontWeight: FontWeight.bold,
-                                  fontSize: 12,
-                                ),
-                              ),
-                            ),
-                          ],
-                        ),
-                      ],
-                    ),
-                  ),
-                );
-              },
-            ),
+          // ビーコン別受信統計は非表示
         ],
       ),
     );
@@ -419,7 +332,15 @@ class _ExhibitorScreenState extends State<ExhibitorScreen>
             ),
             const SizedBox(height: 24),
             ElevatedButton.icon(
-              onPressed: () => Navigator.of(context).pushNamed('/visitor_management'),
+              onPressed: () {
+                Navigator.of(context).push(
+                  MaterialPageRoute(
+                    builder: (_) => VisitorManagementScreen(
+                      targetBoothId: 'FSC-BP104D',
+                    ),
+                  ),
+                );
+              },
               icon: const Icon(Icons.open_in_new),
               label: const Text('来場者管理を開く'),
               style: ElevatedButton.styleFrom(

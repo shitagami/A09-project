@@ -3,7 +3,8 @@ import '../services/auth_service.dart';
 import '../services/firebase_service.dart';
 
 class VisitorManagementScreen extends StatefulWidget {
-  const VisitorManagementScreen({super.key});
+  final String? targetBoothId; // 特定ブースに絞る場合
+  const VisitorManagementScreen({super.key, this.targetBoothId});
 
   @override
   State<VisitorManagementScreen> createState() => _VisitorManagementScreenState();
@@ -31,7 +32,9 @@ class _VisitorManagementScreenState extends State<VisitorManagementScreen> {
 
     try {
       final userName = await _authService.getUserName();
-      final visitors = await _firebaseService.getAllVisitors();
+      final visitors = await _firebaseService.getAllVisitors(
+        targetBoothId: widget.targetBoothId,
+      );
       final reservations = await _firebaseService.getAllReservations();
       
       // 来場者データに予約情報を追加
